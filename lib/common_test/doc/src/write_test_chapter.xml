@@ -73,7 +73,7 @@
     </p>
 
     <p>The callback functions to be implemented by the test suite are
-      all listed in module <seeerl marker="common_test">common_test
+      all listed in module <seeerl marker="ct_suite">ct_suite
       </seeerl>. They are also described in more detail later in this User's Guide.
     </p>
 
@@ -277,10 +277,9 @@
     <seemfa marker="stdlib:proplists#get_value/2"><c>proplists:get_value/2</c></seemfa>.
     Also, or alternatively, the general <seeerl marker="stdlib:lists"><c>lists</c></seeerl>
     module contains useful functions. Normally, the only operations
-    performed on <c>Config</c> is insert (adding a tuple to the head of the list)
-    and lookup. <c>Common Test</c> provides a simple macro named <c>?config</c>,
-    which returns a value of an item in <c>Config</c> given the key (exactly like
-    <c>proplists:get_value</c>). Example: <c>PrivDir = ?config(priv_dir, Config)</c>.
+    performed on <c>Config</c> are insertion (adding a tuple to the head of the list)
+    and lookup. To look up a value in the config, <c>proplists:get_value</c> can
+    be used. For example: <c>PrivDir = proplists:get_value(priv_dir, Config)</c>.
     </p>
 
     <p>If the test case function crashes or exits purposely, it is considered
@@ -717,7 +716,7 @@
     <p>The following is an example of how to return the status from a group:</p>
     <pre>
  end_per_group(_Group, Config) ->
-     Status = ?config(tc_group_result, Config),
+     Status = proplists:get_value(tc_group_result, Config),
      case proplists:get_value(failed, Status) of
          [] ->                                   % no failed cases
              {return_group_result,ok};
@@ -733,7 +732,7 @@
     <p><em>Example:</em></p>
     <pre>
  end_per_group(group1, Config) ->
-     Status = ?config(tc_group_result, Config),
+     Status = proplists:get_value(tc_group_result, Config),
      Failed = proplists:get_value(failed, Status),
      case lists:member({group_result,group2}, Failed) of
            true ->
@@ -826,7 +825,7 @@
 
     <p>In the data directory, <c>data_dir</c>, the test module has
       its own files needed for the testing. The name of <c>data_dir</c>
-      is the the name of the test suite followed by <c>"_data"</c>.
+      is the name of the test suite followed by <c>"_data"</c>.
       For example, <c>"some_path/foo_SUITE.beam"</c> has the data directory
       <c>"some_path/foo_SUITE_data/"</c>. Use this directory for portability,
       that is, to avoid hardcoding directory names in your suite. As the data
@@ -957,7 +956,7 @@
     When the timetrap function returns, the time-out is triggered, <em>unless</em>
     the return value is a valid timetrap time, such as an integer,
     or a <c>{SecMinOrHourTag,Time}</c> tuple (for details, see module
-    <seeerl marker="common_test">common_test</seeerl>). If a time value
+    <seeerl marker="ct_suite">ct_suite</seeerl>). If a time value
     is returned, a new timetrap is started to generate a time-out after
     the specified time.</p>
 

@@ -33,6 +33,51 @@
     <file>notes.xml</file>
     </header>
 
+<section><title>Common_Test 1.26</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    With this change, common_test returns an error when suite
+	    with a badly defined group is executed.</p>
+          <p>
+	    *** POTENTIAL INCOMPATIBILITY ***</p>
+          <p>
+	    Own Id: OTP-18728 Aux Id: PR-7487, PR-7674 </p>
+        </item>
+        <item>
+          <p>
+	    With this change, stylesheet option is applied to all
+	    HTML report pages.</p>
+          <p>
+	    Own Id: OTP-18760</p>
+        </item>
+        <item>
+          <p>
+	    Update all &lt;tt&gt; html tags to be &lt;code&gt;
+	    instead.</p>
+          <p>
+	    Own Id: OTP-18799 Aux Id: PR-7695 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    This change fixes docs, so that historically deprecated
+	    ?config macro is no longer recommended to be used.</p>
+          <p>
+	    Own Id: OTP-18858 Aux Id: PR-7825 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
 <section><title>Common_Test 1.25.1</title>
 
     <section><title>Fixed Bugs and Malfunctions</title>
@@ -3991,7 +4036,7 @@
         </item>
         <item>
           <p>
-	    If a timetrap timeout occurred during execution of of a
+	    If a timetrap timeout occurred during execution of a
 	    function in a lib module (i.e. a function called directly
 	    or indirectly from a test case), the Suite argument in
 	    the end_tc/3 framework callback function would not
@@ -5082,7 +5127,7 @@
         <item>
           <p>
 	    The rx library, included with common_test, failed to
-	    build on on some architectures because the -fPIC compiler
+	    build on some architectures because the -fPIC compiler
 	    option was missing.</p>
           <p>
 	    Own Id: OTP-7111</p>

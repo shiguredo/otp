@@ -866,7 +866,11 @@ erts_proc_sig_send_is_alive_request(Process *c_p, Eterm to,
  * @param[in]     item_ix       Info index array to pass to
  *                              erts_process_info()
  *
- * @param[in]     len           Length of info index array
+ * @param[in]     item_extra    Extra terms array to pass to
+ *                              erts_process_info()
+ *
+ * @param[in]     len           Length of info index array and
+ *                              extra array if such is provided
  *
  * @param[in]     need_msgq_len Non-zero if message queue
  *                              length is needed; otherwise,
@@ -892,6 +896,7 @@ int
 erts_proc_sig_send_process_info_request(Process *c_p,
                                         Eterm to,
                                         int *item_ix,
+                                        Eterm *item_extra,
                                         int len,
                                         int need_msgq_len,
                                         int flags,
@@ -944,7 +949,7 @@ erts_proc_sig_send_sync_suspend(Process *c_p, Eterm to,
  * term returned by 'func'. If the return value of
  * 'func' is not an immediate term, 'func' has to
  * allocate a heap fragment where the result is stored
- * and update the the heap fragment pointer pointer
+ * and update the heap fragment pointer pointer
  * passed as third argument to point to it.
  *
  * If this function returns a reference, 'func' will
@@ -1009,7 +1014,7 @@ erts_proc_sig_send_rpc_request(Process *c_p,
  * term returned by 'func'. If the return value of
  * 'func' is not an immediate term, 'func' has to
  * allocate a heap fragment where the result is stored
- * and update the the heap fragment pointer pointer
+ * and update the heap fragment pointer pointer
  * passed as third argument to point to it.
  *
  * If this function returns a reference, 'func' will
@@ -1919,15 +1924,12 @@ erts_proc_notify_new_sig(Process* rp, erts_aint32_t state,
         state = erts_proc_sys_schedule(rp, state, enable_flag);
     }
 
-    if (state & ERTS_PSFLG_DIRTY_RUNNING) {
-        /*
-         * We ignore ERTS_PSFLG_DIRTY_RUNNING_SYS. For
-         * more info see erts_execute_dirty_system_task()
-         * in erl_process.c.
-         */
+    if (ERTS_PROC_IN_DIRTY_STATE(state)) {
         erts_ensure_dirty_proc_signals_handled(rp, state, -1, 0);
     }
 }
+
+
 
 ERTS_GLB_INLINE void
 erts_proc_notify_new_message(Process *p, ErtsProcLocks locks)
@@ -1936,12 +1938,7 @@ erts_proc_notify_new_message(Process *p, ErtsProcLocks locks)
     erts_aint32_t state = erts_atomic32_read_nob(&p->state);
     if (!(state & ERTS_PSFLG_ACTIVE))
 	erts_schedule_process(p, state, locks);
-    if (state & ERTS_PSFLG_DIRTY_RUNNING) {
-        /*
-         * We ignore ERTS_PSFLG_DIRTY_RUNNING_SYS. For
-         * more info see erts_execute_dirty_system_task()
-         * in erl_process.c.
-         */
+    if (ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state)) {
         erts_ensure_dirty_proc_signals_handled(p, state, -1, locks);
     }
 }

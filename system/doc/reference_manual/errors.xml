@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>2003</year><year>2021</year>
+      <year>2003</year><year>2023</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -121,7 +121,7 @@
 	<title>The call-stack back trace (stacktrace)</title>
         <p>The stack back-trace
           (<seetype marker="erts:erlang#stacktrace"><em>stacktrace</em></seetype>)
-          is a list contains <c>{Module, Function, Arity, ExtraInfo}</c>
+          is a list that contains <c>{Module, Function, Arity, ExtraInfo}</c>
           and/or <c>{Fun, Arity, ExtraInfo}</c> tuples. The field <c>Arity</c> in the
           tuple can be the argument list of that function call instead of an
           arity integer, depending on the exception.</p>

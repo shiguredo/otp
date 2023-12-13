@@ -200,7 +200,9 @@ typedef struct {
     Uint reserve_size;
     Uint len;
     int flags;
-    int item_ix[1]; /* of len size in reality... */
+    int *item_ix;
+    Eterm *item_extra;
+    ErlHeapFragment *extra_hfrag;
 } ErtsProcessInfoSig;
 
 #define ERTS_PROC_SIG_PI_MSGQ_LEN_IGNORE        ((Sint) -1)
@@ -509,6 +511,14 @@ destroy_sig_group_leader(ErtsSigGroupLeader *sgl)
     erts_free(ERTS_ALC_T_SIG_DATA, sgl);
 }
 
+static void
+destroy_process_info_sig(ErtsProcessInfoSig *pis)
+{
+    if (pis->extra_hfrag)
+        erts_cleanup_offheap(&pis->extra_hfrag->off_heap);
+    erts_free(ERTS_ALC_T_SIG_DATA, pis);
+}
+
 static ERTS_INLINE void
 sig_enqueue_trace(ErtsPTabElementCommon *sender, Eterm from,
                   ErtsMessage **sigp, int op, Process *rp,
@@ -811,7 +821,7 @@ notify_dirty_signal_handler(Eterm pid,
     ErtsMessage *mp;
     Process *sig_handler;
 
-    ASSERT(state & ERTS_PSFLG_DIRTY_RUNNING);
+    ASSERT(state & (ERTS_PSFLGS_DIRTY_WORK|ERTS_PSFLG_DIRTY_RUNNING));
 
     if (prio < 0)
         prio = (int) ERTS_PSFLGS_GET_USR_PRIO(state);
@@ -851,13 +861,10 @@ delayed_notify_dirty_signal_handler(void *vdshnp)
     if (proc) {
         erts_aint32_t state = erts_atomic32_read_acqb(&proc->state);
         /*
-         * Notify the dirty signal handler if it is still running
-         * dirty and still have signals to handle...
+         * Notify the dirty signal handler if it is still scheduled
+         * or running dirty and still have signals to handle...
          */
-        if (!!(state & ERTS_PSFLG_DIRTY_RUNNING)
-            & !!(state & (ERTS_PSFLG_SIG_Q
-                          | ERTS_PSFLG_NMSG_SIG_IN_Q
-                          | ERTS_PSFLG_MSG_SIG_IN_Q))) {
+        if (ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state)) {
             notify_dirty_signal_handler(dshnp->pid, state, dshnp->prio);
         }
     }
@@ -1141,12 +1148,7 @@ maybe_elevate_sig_handling_prio(Process *c_p, int prio, Eterm other)
             if (res) {
                 /* ensure handled if dirty executing... */
                 state = erts_atomic32_read_nob(&rp->state);
-                /*
-                 * We ignore ERTS_PSFLG_DIRTY_RUNNING_SYS. For
-                 * more info see erts_execute_dirty_system_task()
-                 * in erl_process.c.
-                 */
-                if (state & ERTS_PSFLG_DIRTY_RUNNING)
+                if (ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state))
                     erts_ensure_dirty_proc_signals_handled(rp, state,
                                                            min_prio, 0);
             }
@@ -1154,6 +1156,15 @@ maybe_elevate_sig_handling_prio(Process *c_p, int prio, Eterm other)
     }
     return res;
 }
+
+typedef struct {
+    Eterm pid;
+    int nmsig;
+    int msig;
+} ErtsSchedSignalNotify;
+
+static void
+sched_sig_notify(void *vssnp);
 
 void
 erts_proc_sig_fetch__(Process *proc,
@@ -1265,11 +1276,53 @@ erts_proc_sig_fetch__(Process *proc,
              * future call to erts_proc_sig_fetch().
              */
             if (erts_atomic32_read_nob(&buffers->nonmsgs_in_slots))
-                set_flags |= ERTS_PSFLG_ACTIVE_SYS|ERTS_PSFLG_NMSG_SIG_IN_Q;
+                set_flags |= ERTS_PSFLG_NMSG_SIG_IN_Q;
             if (erts_atomic32_read_nob(&buffers->msgs_in_slots))
-                set_flags |= ERTS_PSFLG_ACTIVE|ERTS_PSFLG_MSG_SIG_IN_Q;
-            if (set_flags)
-                (void) erts_atomic32_read_bor_relb(&proc->state, set_flags);
+                set_flags |= ERTS_PSFLG_MSG_SIG_IN_Q;
+            if (set_flags) {
+                erts_aint32_t oflgs;
+                oflgs = erts_atomic32_read_bor_relb(&proc->state, set_flags);
+                if ((oflgs & (ERTS_PSFLG_NMSG_SIG_IN_Q
+                              | ERTS_PSFLG_MSG_SIG_IN_Q)) != set_flags) {
+                    int msig = 0, nmsig = 0;
+                    /*
+                     * We did set at least one of the flags; check if we may
+                     * need to set corresponding active flag(s)...
+                     */
+                    if ((!!(set_flags & ERTS_PSFLG_NMSG_SIG_IN_Q))
+                        & (!(oflgs & (ERTS_PSFLG_NMSG_SIG_IN_Q
+                                      | ERTS_PSFLG_ACTIVE_SYS)))) {
+                        /* We set nmsig-in-q flag and active-sys missing... */
+                        nmsig = !0;
+                    }
+                    if ((!!(set_flags & ERTS_PSFLG_MSG_SIG_IN_Q))
+                        & (!(oflgs & (ERTS_PSFLG_MSG_SIG_IN_Q
+                                      | ERTS_PSFLG_ACTIVE)))) {
+                        /* We set msig-in-q flag and active missing... */
+                        msig = !0;
+                    }
+                    if (msig | nmsig) {
+                        /*
+                         * We don't know exactly what locks we got, so
+                         * we need to schedule the notification...
+                         */
+                        ErtsSchedulerData *esdp = erts_get_scheduler_data();
+                        int tid = (esdp && esdp->type == ERTS_SCHED_NORMAL
+                                   ? (int) esdp->no
+                                   : 1);
+                        ErtsSchedSignalNotify *ssnp =
+                            (ErtsSchedSignalNotify *)
+                            erts_alloc(ERTS_ALC_T_SCHD_SIG_NTFY,
+                                       sizeof(ErtsSchedSignalNotify));
+                        ssnp->nmsig = nmsig;
+                        ssnp->msig = msig;
+                        ssnp->pid = proc->common.id;
+                        erts_schedule_misc_aux_work(tid,
+                                                    sched_sig_notify,
+                                                    (void *) ssnp);
+                    }
+                }
+            }
             /* else:
              *       Another thread is currently operating on a buffer and
              *       will soon set appropriate.
@@ -1278,6 +1331,45 @@ erts_proc_sig_fetch__(Process *proc,
     unget_buffers_return:
         erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
     }
+}
+
+static void
+sched_sig_notify(void *vssnp)
+{
+    ErtsSchedSignalNotify *ssnp = (ErtsSchedSignalNotify *) vssnp;
+    Process *proc = erts_proc_lookup(ssnp->pid);
+    if (proc) {
+        erts_aint32_t state = erts_atomic32_read_acqb(&proc->state);
+        int nmsig = ssnp->nmsig;
+        int msig = ssnp->msig;
+        ASSERT(nmsig || msig);
+        if ((!!nmsig) & ((!(state & (ERTS_PSFLG_SIG_Q
+                                     | ERTS_PSFLG_NMSG_SIG_IN_Q)))
+                         | (!!(state & ERTS_PSFLG_ACTIVE_SYS)))) {
+            /*
+             * Either already handled or someone else set the active-sys
+             * flag...
+             */
+            nmsig = 0;
+        }
+        if ((!!msig) & (!!(state & ERTS_PSFLG_ACTIVE))) {
+            /*
+             * Someone else set the active flag (we cannot determine if it
+             * has been handled or not by looking at the state flag)...
+             */
+            msig = 0;
+        }
+        if (msig|nmsig) {
+            if (!nmsig) {
+                erts_proc_notify_new_message(proc, 0);
+            }
+            else {
+                erts_aint32_t extra = msig ? ERTS_PSFLG_ACTIVE : 0;
+                erts_proc_notify_new_sig(proc, state, extra);
+            }
+        }
+    }
+    erts_free(ERTS_ALC_T_SCHD_SIG_NTFY, vssnp);
 }
 
 Sint
@@ -1983,8 +2075,14 @@ erts_proc_sig_send_dist_to_alias(Eterm from, Eterm alias,
 
     ASSERT(is_ref(alias));
     pid = erts_get_pid_of_ref(alias);
-    if (!is_internal_pid(pid))
+    if (!is_internal_pid(pid)) {
+        if (hfrag) {
+            /* Fragmented message... */
+            erts_free_dist_ext_copy(erts_get_dist_ext(hfrag));
+            free_message_buffer(hfrag);
+        }
         return;
+    }
 
     /*
      * The receiver can distinguish between these two scenarios by
@@ -2684,15 +2782,88 @@ int
 erts_proc_sig_send_process_info_request(Process *c_p,
                                         Eterm to,
                                         int *item_ix,
+                                        Eterm *item_extra,
                                         int len,
                                         int need_msgq_len,
                                         int flags,
                                         Uint reserve_size,
                                         Eterm ref)
 {
-    Uint size = sizeof(ErtsProcessInfoSig) + (len - 1) * sizeof(int);
-    ErtsProcessInfoSig *pis = erts_alloc(ERTS_ALC_T_SIG_DATA, size);
+    Uint size, item_ix_offs, extra_offs, extra_hfrag_offs,
+        extra_hsz = 0, *extra_hszs = NULL;
+    ErtsProcessInfoSig *pis;
     int res;
+
+    if (item_extra) {
+        int i;
+        extra_hszs = erts_alloc(ERTS_ALC_T_TMP, sizeof(Uint)*len);
+        for (i = 0; i < len; i++) {
+            Eterm extra = item_extra[i];
+            extra_hszs[i] = (is_non_value(extra) || is_immed(extra)
+                             ? 0
+                             : size_object(extra));
+            extra_hsz += extra_hszs[i];
+        }
+    }
+
+    size = ERTS_ALC_WORD_ALIGN_SIZE(sizeof(ErtsProcessInfoSig));
+    item_ix_offs = size;
+    size += ERTS_ALC_WORD_ALIGN_SIZE(len * sizeof(int));
+    if (!item_extra) {
+        extra_offs = 0;
+        extra_hfrag_offs = 0;
+    }
+    else {
+        extra_offs = size;
+        size += ERTS_ALC_WORD_ALIGN_SIZE(len * sizeof(Eterm));
+        extra_hfrag_offs = size;
+        if (extra_hsz)
+            size += ERTS_HEAP_FRAG_SIZE(extra_hsz);
+    }
+    pis = erts_alloc(ERTS_ALC_T_SIG_DATA, size);
+    pis->item_ix = (int *) (((char *) pis) + item_ix_offs);
+    if (!item_extra) {
+        ASSERT(!extra_offs);
+        pis->item_extra = NULL;
+        pis->extra_hfrag = NULL;
+    }
+    else {
+        int i;
+        Eterm *extra_hp;
+        ErlOffHeap *extra_off_heap;
+#ifdef DEBUG
+        Eterm *end_hp = NULL;
+#endif
+        ASSERT(extra_offs);
+        pis->item_extra = (Eterm *) (((char *) pis) + extra_offs);
+        if (!extra_hsz) {
+            extra_hp = NULL;
+            extra_off_heap = NULL;
+            pis->extra_hfrag = NULL;
+        }
+        else {
+            pis->extra_hfrag = (ErlHeapFragment *) (((char *) pis)
+                                                    + extra_hfrag_offs);
+            ERTS_INIT_HEAP_FRAG(pis->extra_hfrag, extra_hsz, extra_hsz);
+            extra_hp = &pis->extra_hfrag->mem[0];
+#ifdef DEBUG
+            end_hp = extra_hp + extra_hsz;
+#endif
+            extra_off_heap = &pis->extra_hfrag->off_heap;
+        }
+        for (i = 0; i < len; i++) {
+            if (!extra_hsz || !extra_hszs[i]) {
+                pis->item_extra[i] = item_extra[i];
+            }
+            else {
+                pis->item_extra[i] = copy_struct(item_extra[i], extra_hszs[i],
+                                                 &extra_hp, extra_off_heap);
+            }
+        }
+        ASSERT(extra_hp == end_hp);
+        erts_free(ERTS_ALC_T_TMP, extra_hszs);
+        reserve_size += sizeof(Eterm)*extra_hsz;
+    }
 
     ASSERT(c_p);
     ASSERT(item_ix);
@@ -2730,7 +2901,7 @@ erts_proc_sig_send_process_info_request(Process *c_p,
     if (res) {
         (void) maybe_elevate_sig_handling_prio(c_p, -1, to);
     } else {
-        erts_free(ERTS_ALC_T_SIG_DATA, pis);
+        destroy_process_info_sig(pis);
     }
 
     return res;
@@ -4713,12 +4884,17 @@ destroy_process_info_request(Process *c_p, ErtsProcessInfoSig *pisig)
                 = (ErtsProcessInfoSig *) (((char *) marker)
                                           - offsetof(ErtsProcessInfoSig,
                                                      marker));
-            erts_free(ERTS_ALC_T_SIG_DATA, pisig2);
+            destroy_process_info_sig(pisig2);
         }
     }
 
-    if (dealloc_pisig)
-        erts_free(ERTS_ALC_T_SIG_DATA, pisig);
+    if (dealloc_pisig) {
+        destroy_process_info_sig(pisig);
+    }
+    else if (pisig->extra_hfrag) {
+        erts_cleanup_offheap(&pisig->extra_hfrag->off_heap);
+        pisig->extra_hfrag = NULL;
+    }
 }
 
 static int
@@ -4826,7 +5002,7 @@ handle_process_info(Process *c_p, ErtsSigRecvTracing *tracing,
             erts_factory_selfcontained_message_init(&hfact, mp, &hfrag->mem[0]);
 
             res = erts_process_info(c_p, &hfact, c_p, ERTS_PROC_LOCK_MAIN,
-                                    pisig->item_ix, pisig->len,
+                                    pisig->item_ix, pisig->item_extra, pisig->len,
                                     pisig->flags, reserve_size, &reds);
 
             hp = erts_produce_heap(&hfact,
@@ -5430,8 +5606,6 @@ handle_alias_message(Process *c_p, ErtsMessage *sig, ErtsMessage ***next_nm_sig)
     ASSERT(is_internal_pid(from) || is_atom(from));
     ASSERT(is_internal_pid_ref(alias));
 
-    ERL_MESSAGE_FROM(sig) = from;
-    
     mon = erts_monitor_tree_lookup(ERTS_P_MONITORS(c_p), alias);
     flags = mon ? mon->flags : (Uint16) 0;
     if (!(flags & ERTS_ML_STATE_ALIAS_MASK)
@@ -5441,17 +5615,13 @@ handle_alias_message(Process *c_p, ErtsMessage *sig, ErtsMessage ***next_nm_sig)
          * drop message...
          */
         remove_nm_sig(c_p, sig, next_nm_sig);
-        /* restored as message... */
-        ERL_MESSAGE_TERM(sig) = msg;
-        if (type == ERTS_SIG_Q_TYPE_DIST)
-            sig->data.heap_frag = &sig->hfrag;
-        else
-            sig->data.attached = data_attached;
         sig->next = NULL;;
         erts_cleanup_messages(sig);
         return 2;
     }
 
+    ERL_MESSAGE_FROM(sig) = from;
+    
     if ((flags & ERTS_ML_STATE_ALIAS_MASK) == ERTS_ML_STATE_ALIAS_ONCE) {
         mon->flags &= ~ERTS_ML_STATE_ALIAS_MASK;
 
@@ -8098,12 +8268,7 @@ erts_internal_dirty_process_handle_signals_1(BIF_ALIST_1)
         BIF_RET(am_noproc);
 
     state = erts_atomic32_read_acqb(&rp->state);
-    dirty = (state & ERTS_PSFLG_DIRTY_RUNNING);
-    /*
-     * Ignore ERTS_PSFLG_DIRTY_RUNNING_SYS (see
-     * comment in erts_execute_dirty_system_task()
-     * in erl_process.c).
-     */
+    dirty = ERTS_PROC_IN_DIRTY_STATE(state);
     if (!dirty)
         BIF_RET(am_normal);
 
@@ -8117,7 +8282,7 @@ erts_internal_dirty_process_handle_signals_1(BIF_ALIST_1)
 
     state = erts_atomic32_read_mb(&rp->state);
     noproc = (state & ERTS_PSFLG_FREE);
-    dirty = (state & ERTS_PSFLG_DIRTY_RUNNING);
+    dirty = ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state);
 
     if (busy) {
         if (noproc)

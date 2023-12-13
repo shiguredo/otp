@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1997-2022. All Rights Reserved.
+ * Copyright Ericsson AB 1997-2023. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -150,7 +150,9 @@ void output_drive_info(char* drive){
 	    }
 	    else
 		if (fpGetDiskFreeSpaceEx(drive,&availbytes,&totbytes,&totbytesfree)){
-		    sprintf(answer,"%s DRIVE_FIXED %I64u %I64u %I64u\n",drive,availbytes,totbytes,totbytesfree);
+		    sprintf(answer,"%s DRIVE_FIXED %I64u %I64u %I64u\n",
+                            drive, availbytes.QuadPart, totbytes.QuadPart,
+                            totbytesfree.QuadPart);
 		    return_answer(answer);
 		}
 		else {

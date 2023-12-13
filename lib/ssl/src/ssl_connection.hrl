@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2013-2022. All Rights Reserved.
+%% Copyright Ericsson AB 2013-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -184,9 +184,7 @@
 %%
 %%   cipher_type                  - TLS 1.3 uses only AEAD ciphers
 %%   iv_size                      - not used
-%%   key_size                     - not used
 %%   key_material_length          - not used
-%%   expanded_key_material_length - used in SSL 3.0
 %%   mac_algorithm                - not used
 %%   prf_algorithm                - not used
 %%   hash_size                    - not used
@@ -194,7 +192,6 @@
 %%   master_secret                - used for multiple secret types in TLS 1.3
 %%   client_random                - not used
 %%   server_random                - not used
-%%   exportable                   - not used
 %%
 %% cipher_state :: record()
 %%   nonce - used for sequence_number

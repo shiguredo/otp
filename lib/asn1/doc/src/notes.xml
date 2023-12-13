@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>2004</year><year>2022</year>
+      <year>2004</year><year>2023</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -31,6 +31,22 @@
   </header>
   <p>This document describes the changes made to the asn1 application.</p>
 
+
+<section><title>Asn1 5.2.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix benign warning from gcc 11 about mismatching call to
+	    free().</p>
+          <p>
+	    Own Id: OTP-18844</p>
+        </item>
+      </list>
+    </section>
+
+</section>
 
 <section><title>Asn1 5.2</title>
 
@@ -723,7 +739,7 @@
       <list>
         <item>
           <p>
-	    Many bugs have been eliminated in the the ASN.1 compiler
+	    Many bugs have been eliminated in the ASN.1 compiler
 	    so that it can now successfully compile many more ASN.1
 	    specifications. Error messages have also been improved.</p>
           <p>
@@ -977,7 +993,7 @@
         <item>
           <p>
 	    The ASN.1 compiler would fail to compile a constraint
-	    with values given for for the extension part (such as
+	    with values given for the extension part (such as
 	    <c>INTEGER (1..10, ..., 11..20)</c>).</p>
           <p>
 	    Own Id: OTP-11504</p>

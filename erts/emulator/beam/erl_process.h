@@ -1314,6 +1314,34 @@ void erts_check_for_holes(Process* p);
 					 | ERTS_PSFLG_DIRTY_RUNNING	\
 					 | ERTS_PSFLG_DIRTY_RUNNING_SYS)
 
+/*
+ * Process is in a dirty state if it got dirty work scheduled or
+ * is running dirty. We do not include the dirty-running-sys state
+ * since it executing while holding the main process lock which makes
+ * it hard or impossible to manipulate from the outside. The time spent
+ * in the dirty-running-sys is also limited compared to the other dirty
+ * states.
+ *
+ * For more info on why we ignore dirty running sys see
+ * erts_execute_dirty_system_task() in erl_process.c.
+ */
+#define ERTS_PROC_IN_DIRTY_STATE(S)                                     \
+    ((!!((S) & (ERTS_PSFLGS_DIRTY_WORK                                  \
+                | ERTS_PSFLG_DIRTY_RUNNING)))                           \
+     & (!((S) & (ERTS_PSFLG_DIRTY_RUNNING_SYS                           \
+                 | ERTS_PSFLG_RUNNING_SYS                               \
+                 | ERTS_PSFLG_RUNNING))))
+
+/*
+ * A process needs dirty signal handling if it has unhandled signals
+ * and is in a dirty state...
+ */
+#define ERTS_PROC_NEED_DIRTY_SIG_HANDLING(S)                            \
+    ((!!((S) & (ERTS_PSFLG_SIG_Q                                        \
+                | ERTS_PSFLG_NMSG_SIG_IN_Q                              \
+                | ERTS_PSFLG_MSG_SIG_IN_Q)))                            \
+     & ERTS_PROC_IN_DIRTY_STATE((S)))
+
 #define ERTS_PSFLGS_GET_ACT_PRIO(PSFLGS) \
     (((PSFLGS) >> ERTS_PSFLGS_ACT_PRIO_OFFSET) & ERTS_PSFLGS_PRIO_MASK)
 #define ERTS_PSFLGS_GET_USR_PRIO(PSFLGS) \
@@ -1648,7 +1676,7 @@ extern int erts_system_profile_ts_type;
 #  define F_INITIAL_TRACE_FLAGS 0
 #endif
 
-/* F_TIMESTAMP_MASK is a bit-field of all all timestamp types */
+/* F_TIMESTAMP_MASK is a bit-field of all timestamp types */
 #define F_TIMESTAMP_MASK \
     (ERTS_TRACE_TS_TYPE_MASK << ERTS_TRACE_FLAGS_TS_TYPE_SHIFT)
 
@@ -2031,7 +2059,7 @@ void erts_dump_extended_process_state(fmtfn_t to, void *to_arg, erts_aint32_t ps
 void erts_dump_process_state(fmtfn_t to, void *to_arg, erts_aint32_t psflg);
 Eterm erts_process_info(Process *c_p, ErtsHeapFactory *hfact,
                         Process *rp, ErtsProcLocks rp_locks,
-                        int *item_ix, int item_ix_len,
+                        int *item_ix, Eterm *item_extra, int item_len,
                         int flags, Uint reserve_size, Uint *reds);
 
 typedef struct {

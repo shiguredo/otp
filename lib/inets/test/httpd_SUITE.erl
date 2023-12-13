@@ -72,6 +72,9 @@ all() ->
      {group, https_security},
      {group, http_reload},
      {group, https_reload},
+     {group, http_default_type},
+     {group, http_mime_type},
+     {group, http_mime_and_default_type},
      {group, http_mime_types},
      {group, http_logging},
      {group, http_post},
@@ -108,6 +111,9 @@ groups() ->
      {http_not_sup, [], [{group, not_sup}]},
      {https_not_sup, [], [{group, not_sup}]},
      {https_alert, [], [tls_alert]},
+     {http_default_type, [], [default_type]},
+     {http_mime_type, [], [mime_type]},
+     {http_mime_and_default_type, [], [mime_and_default_type]},
      {http_mime_types, [parallel], [alias_1_1, alias_1_0]},
      {limit, [],  [content_length, max_clients_1_1]},
      {custom, [],  [customize, add_default]},
@@ -156,6 +162,7 @@ http_get() ->
      bad_dot_paths,
      %%actions, Add configuration so that this test mod_action
      esi,
+     filename_too_long,
      bad_hex,
      missing_CR,
      max_header,
@@ -240,6 +247,9 @@ init_per_group(Group, Config0)  when  Group == http_basic;
 				      Group == http_reload;
                                       Group == http_not_sup;
                                       Group == http_post;
+                                      Group == http_default_type;
+                                      Group == http_mime_type;
+				      Group == http_mime_and_default_type;
                                       Group == http_mime_types
 				      ->
     ok = start_apps(Group),
@@ -282,6 +292,9 @@ end_per_group(Group, _Config)  when  Group == http_basic;
 				     Group == http_security;
 				     Group == http_reload;
                                      Group == http_post;
+                                     Group == http_default_type;
+                                     Group == http_mime_type;
+				     Group == http_mime_and_default_type;
                                      Group == http_mime_types;
                                      Group == esi
 				     ->
@@ -895,8 +908,8 @@ chunked(Config) when is_list(Config) ->
 		      proplists:get_value(host, Config), proplists:get_value(node, Config)).
 %%-------------------------------------------------------------------------
 expect() ->   
-    ["Check that the server handles request with the expect header "
-     "field appropriate"].
+    [{doc, "Check that the server handles request with the expect header "
+      "field appropriate"}].
 expect(Config) when is_list(Config) ->
     httpd_1_1:expect(proplists:get_value(type, Config), proplists:get_value(port, Config), 
 		     proplists:get_value(host, Config), proplists:get_value(node, Config)).
@@ -1146,6 +1159,72 @@ cgi_chunked_encoding_test(Config) when is_list(Config) ->
 					    proplists:get_value(node, Config),
 					    Requests).
 %%-------------------------------------------------------------------------
+default_type() ->
+    [{doc, "Test default_type"}].
+
+default_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
+mime_type() ->
+    [{doc, "Test mime_type"}].
+
+mime_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
+mime_and_default_type() ->
+    [{doc, "Test that mime_type takes precedence over default_type"}].
+
+mime_and_default_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
 alias_1_1() ->
     [{doc, "Test mod_alias"}].
 
@@ -1245,19 +1324,19 @@ trace(Config) when is_list(Config) ->
 	     proplists:get_value(host, Config), proplists:get_value(node, Config)).
 %%-------------------------------------------------------------------------
 light() ->
-    ["Test light load"].
+    [{doc, "Test light load"}].
 light(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config), 10).
 %%-------------------------------------------------------------------------
 medium() ->
-    ["Test  medium load"].
+    [{doc, "Test  medium load"}].
 medium(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config), 100).
 %%-------------------------------------------------------------------------
 heavy() ->
-    ["Test heavy load"].
+    [{doc, "Test heavy load"}].
 heavy(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config),
@@ -1275,9 +1354,23 @@ content_length(Config) ->
 				       [{statuscode, 200},
 					{content_length, 274},
 					{version, Version}]).
+
+%-------------------------------------------------------------------------
+filename_too_long() ->
+    [{doc, "Tests what happens if supplied filename exceeds os-limit of filename characters."}].
+filename_too_long(Config) ->
+    Version = proplists:get_value(http_version, Config),
+    Host = proplists:get_value(host, Config),
+    TooLongFileName = lists:duplicate(257, $F),
+    ok = httpd_test_lib:verify_request(proplists:get_value(type, Config), Host,
+				       proplists:get_value(port, Config), proplists:get_value(node, Config),
+				       http_request("GET /" ++ TooLongFileName ++ " ", Version, Host),
+				       [{statuscode, 404},
+					{version, Version}]).
+
 %%-------------------------------------------------------------------------
 bad_hex() ->
-    ["Tests that a URI with a bad hexadecimal code is handled OTP-6003"].
+    [{doc, "Tests that a URI with a bad hexadecimal code is handled OTP-6003"}].
 bad_hex(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host = proplists:get_value(host, Config),
@@ -1289,7 +1382,7 @@ bad_hex(Config) ->
 					{version, Version}]).
 %%-------------------------------------------------------------------------
 missing_CR() ->
-     ["Tests missing CR in delimiter OTP-7304"].
+     [{doc, "Tests missing CR in delimiter OTP-7304"}].
 missing_CR(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1318,6 +1411,7 @@ customize(Config) when is_list(Config) ->
 					{no_header, "Server"},
 					{version, Version}]).
 
+%%-------------------------------------------------------------------------
 add_default() ->
     [{doc, "Test adding default header with custom callback"}].
 
@@ -1338,7 +1432,7 @@ add_default(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 max_header() ->
-    ["Denial Of Service (DOS) attack, prevented by max_header"].
+    [{doc, "Denial Of Service (DOS) attack, prevented by max_header"}].
 max_header(Config) when is_list(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1352,7 +1446,7 @@ max_header(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 max_content_length() ->
-    ["Denial Of Service (DOS) attack, prevented by max_content_length"].
+    [{doc, "Denial Of Service (DOS) attack, prevented by max_content_length"}].
 max_content_length(Config) when is_list(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1361,7 +1455,7 @@ max_content_length(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 ignore_invalid_header() ->
-    ["RFC 7230 - 3.2.4 ... No whitespace is allowed between the header field-name and colon"].
+    [{doc, "RFC 7230 - 3.2.4 ... No whitespace is allowed between the header field-name and colon"}].
 ignore_invalid_header(Config) when is_list(Config) ->
      Host =  proplists:get_value(host, Config),
      Port =  proplists:get_value(port, Config),
@@ -2031,6 +2125,9 @@ start_apps(Group) when  Group == http_basic;
 			Group == http_logging;
 			Group == http_reload;
                         Group == http_post;
+                        Group == http_default_type;
+                        Group == http_mime_type;
+                        Group == http_mime_and_default_type;
                         Group == http_mime_types;
                         Group == http_rel_path_script_alias;
                         Group == http_not_sup;
@@ -2129,6 +2226,12 @@ server_config(https_security, Config) ->
     tl(auth_conf(ServerRoot)) ++ security_conf(ServerRoot) ++ server_config(https, Config);
 server_config(http_logging, Config) ->
     log_conf() ++ server_config(http, Config);
+server_config(http_default_type, Config) ->
+    [{default_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
+server_config(http_mime_type, Config) ->
+    [{mime_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
+server_config(http_mime_and_default_type, Config) ->
+    [{default_type, "text/richtext"}, {mime_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
 server_config(http_mime_types, Config0) ->
     Config1 = basic_conf() ++  server_config(http, Config0),
     ServerRoot = proplists:get_value(server_root, Config0),

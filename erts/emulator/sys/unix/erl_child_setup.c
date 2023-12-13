@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2002-2022. All Rights Reserved.
+ * Copyright Ericsson AB 2002-2023. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -459,10 +459,6 @@ main(int argc, char *argv[])
         ABORT("Invalid arguments to child_setup");
     }
 
-    if (isatty(0)) {
-	tcgetattr(0,&initial_tty_mode);
-    }
-
 /* We close all fds except the uds from beam.
    All other fds from now on will have the
    CLOEXEC flags set on them. This means that we
@@ -531,6 +527,13 @@ main(int argc, char *argv[])
     forker_hash_init();
 
     SET_CLOEXEC(uds_fd);
+
+    if (isatty(0)) {
+        ssize_t res = read_all(uds_fd, (char*)&initial_tty_mode, sizeof(struct termios));
+        if (res <= 0) {
+            ABORT("Failed to read initial_tty_mode: %d (%d)", res, errno);
+        }
+    }
 
     DEBUG_PRINT("Starting forker %d", max_files);
 

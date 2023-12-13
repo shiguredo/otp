@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -1089,6 +1089,8 @@ ts_keys_1([], Acc) ->
 foldl(Fun, Acc, Tab) ->
     foldl(Fun, Acc, Tab, read).
 
+-spec foldl(Fun, Acc0, Tab::table(), LockKind :: lock_kind()) -> Acc when
+      Fun::fun((Record::tuple(), Acc0) -> Acc).
 foldl(Fun, Acc, Tab, LockKind) when is_function(Fun) ->
     case get(mnesia_activity_state) of
 	{?DEFAULT_ACCESS, Tid, Ts} ->
@@ -1130,6 +1132,8 @@ do_foldl(A, O, Tab, Key, Fun, Acc, Type, Stored) ->  %% Type is set or bag
       Fun::fun((Record::tuple(), Acc0) -> Acc).
 foldr(Fun, Acc, Tab) ->
     foldr(Fun, Acc, Tab, read).
+-spec foldr(Fun, Acc0, Tab::table(), LockKind::lock_kind()) -> Acc when
+      Fun::fun((Record::tuple(), Acc0) -> Acc).
 foldr(Fun, Acc, Tab, LockKind) when is_function(Fun) ->
     case get(mnesia_activity_state) of
 	{?DEFAULT_ACCESS, Tid, Ts} ->

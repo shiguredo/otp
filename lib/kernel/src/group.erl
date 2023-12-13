@@ -49,7 +49,10 @@ server(Ancestors, Drv, Shell, Options) ->
     put(user_drv, Drv),
     ExpandFun = normalize_expand_fun(Options, fun edlin_expand:expand/2),
     put(expand_fun, ExpandFun),
-    put(echo, proplists:get_value(echo, Options, true)),
+    Echo = proplists:get_value(echo, Options, true),
+    put(echo, Echo),
+    Dumb = proplists:get_value(dumb, Options, false),
+    put(dumb, Dumb),
     put(expand_below, proplists:get_value(expand_below, Options, true)),
 
     server_loop(Drv, start_shell(Shell), []).
@@ -490,19 +493,20 @@ get_chars_line(Prompt, M, F, Xa, Drv, Shell, Buf, Encoding) ->
     get_chars_loop(Pbs, M, F, Xa, Drv, Shell, Buf, start, [], Encoding).
 
 get_chars_loop(Pbs, M, F, Xa, Drv, Shell, Buf0, State, LineCont0, Encoding) ->
-    Result = case get(echo) of
+    Result = case not(get(dumb)) andalso get(echo) of
                  true ->
                      get_line(Buf0, Pbs, LineCont0, Drv, Shell, Encoding);
                  false ->
                      %% get_line_echo_off only deals with lists,
                      %% so convert to list before calling it.
-                     get_line_echo_off(cast(Buf0, list, Encoding), Pbs, Drv, Shell)
+                     get_line_echo_off(cast(Buf0, list), Encoding, Pbs, Drv, Shell)
              end,
     case Result of
         {done,LineCont1,Buf} ->
             get_chars_apply(Pbs, M, F, Xa, Drv, Shell, append(Buf, [], Encoding),
                             State, LineCont1, Encoding);
-
+        {no_translation, unicode, latin1} ->
+            {error,{error,{no_translation, unicode, latin1}}, []};
         interrupted ->
             {error,{error,interrupted},[]};
         terminated ->
@@ -512,7 +516,7 @@ get_chars_loop(Pbs, M, F, Xa, Drv, Shell, Buf0, State, LineCont0, Encoding) ->
 get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
     %% multi line support means that we should not keep the state
     %% but we need to keep it for oldshell mode
-    {State, Line} = case get(echo) of
+    {State, Line} = case not(get(dumb)) andalso get(echo) of
                         true -> {start, edlin:current_line(LineCont)};
                         false -> {State0, LineCont}
                     end,
@@ -543,20 +547,25 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
     end.
 
 get_chars_n_loop(Pbs, M, F, Xa, Drv, Shell, Buf0, State, Encoding) ->
-    try M:F(State, cast(Buf0, get(read_mode), Encoding), Encoding, Xa) of
-        {stop,Result,Rest} ->
-            {ok, Result, append(Rest,[],Encoding)};
-        State1 ->
-            case get_chars_echo_off(Pbs, Drv, Shell) of
-                interrupted ->
-                    {error,{error,interrupted},[]};
-                terminated ->
-                    {exit,terminated};
-                Buf ->
-                    get_chars_n_loop(Pbs, M, F, Xa, Drv, Shell, Buf, State1, Encoding)
+    case check_encoding(Buf0, Encoding) of
+        false ->
+            {error,{error,{no_translation,unicode,Encoding}},[]};
+        true ->
+            try M:F(State, cast(Buf0, get(read_mode), Encoding), Encoding, Xa) of
+                {stop,Result,Rest} ->
+                    {ok, Result, append(Rest,[],Encoding)};
+                State1 ->
+                    case get_chars_echo_off(Pbs, Drv, Shell) of
+                        interrupted ->
+                            {error,{error,interrupted},[]};
+                        terminated ->
+                            {exit,terminated};
+                        Buf ->
+                            get_chars_n_loop(Pbs, M, F, Xa, Drv, Shell, Buf, State1, Encoding)
+                    end
+            catch _:_ ->
+                    {error,{error,err_func(M, F, Xa)},[]}
             end
-    catch _:_ ->
-            {error,{error,err_func(M, F, Xa)},[]}
     end.
 
 %% Convert error code to make it look as before
@@ -816,11 +825,25 @@ more_data(What, Cont0, Drv, Shell, Ls, Encoding) ->
             get_line1(edlin:edit_line([], Cont0), Drv, Shell, Ls, Encoding)
     end.
 
-get_line_echo_off(Chars, Pbs, Drv, Shell) ->
+get_line_echo_off(Chars, ToEnc, Pbs, Drv, Shell) ->
     send_drv_reqs(Drv, [{put_chars, unicode,Pbs}]),
-    get_line_echo_off1(edit_line(Chars,[]), Drv, Shell).
+    case get_line_echo_off1(edit_line(Chars,[]), Drv, Shell) of
+        {done, Line, _Rest} = Res when ToEnc =:= latin1 ->
+            case check_encoding(Line, ToEnc) of
+                false ->
+                    {no_translation, unicode, ToEnc};
+                true ->
+                    Res
+            end;
+        Res ->
+            Res
+    end.
 
-get_line_echo_off1({Chars,[]}, Drv, Shell) ->
+get_line_echo_off1({Chars,[],Rs}, Drv, Shell) ->
+    case get(echo) of
+        true -> send_drv_reqs(Drv, Rs);
+        false -> skip
+    end,
     receive
 	{Drv,{data,Cs}} ->
 	    get_line_echo_off1(edit_line(cast(Cs, list), Chars), Drv, Shell);
@@ -828,11 +851,11 @@ get_line_echo_off1({Chars,[]}, Drv, Shell) ->
 	    get_line_echo_off1(edit_line(eof, Chars), Drv, Shell);
 	{io_request,From,ReplyAs,Req} when is_pid(From) ->
 	    io_request(Req, From, ReplyAs, Drv, Shell, []),
-	    get_line_echo_off1({Chars,[]}, Drv, Shell);
+	    get_line_echo_off1({Chars,[],[]}, Drv, Shell);
         {reply,{From,ReplyAs},Reply} when From =/= undefined ->
             %% We take care of replies from puts here as well
             io_reply(From, ReplyAs, Reply),
-            get_line_echo_off1({Chars,[]},Drv, Shell);
+            get_line_echo_off1({Chars,[],[]},Drv, Shell);
 	{'EXIT',Drv,interrupt} ->
 	    interrupted;
 	{'EXIT',Drv,_} ->
@@ -842,9 +865,12 @@ get_line_echo_off1({Chars,[]}, Drv, Shell) ->
     end;
 get_line_echo_off1(eof, _Drv, _Shell) ->
     {done,eof,eof};
-get_line_echo_off1({Chars,Rest}, _Drv, _Shell) ->
+get_line_echo_off1({Chars,Rest,Rs}, Drv, _Shell) ->
+    case get(echo) of
+        true -> send_drv_reqs(Drv, Rs);
+        false -> skip
+    end,
     {done,lists:reverse(Chars),case Rest of done -> []; _ -> Rest end}.
-
 get_chars_echo_off(Pbs, Drv, Shell) ->
     send_drv_reqs(Drv, [{insert_chars, unicode,Pbs}]),
     get_chars_echo_off1(Drv, Shell).
@@ -879,22 +905,26 @@ get_chars_echo_off1(Drv, Shell) ->
 %% - ^d in posix/icanon mode: eof, delete-forward in edlin
 %% - ^r in posix/icanon mode: reprint (silly in echo-off mode :-))
 %% - ^w in posix/icanon mode: word-erase (produces a beep in edlin)
-edit_line(eof, []) ->
+edit_line(Input, State) ->
+    edit_line(Input, State, []).
+edit_line(eof, [], _) ->
     eof;
-edit_line(eof, Chars) ->
-    {Chars,eof};
-edit_line([],Chars) ->
-    {Chars,[]};
-edit_line([$\r,$\n|Cs],Chars) ->
-    {[$\n | Chars], remainder_after_nl(Cs)};
-edit_line([NL|Cs],Chars) when NL =:= $\r; NL =:= $\n ->
-    {[$\n | Chars], remainder_after_nl(Cs)};
-edit_line([Erase|Cs],[]) when Erase =:= $\177; Erase =:= $\^H ->
-    edit_line(Cs,[]);
-edit_line([Erase|Cs],[_|Chars]) when Erase =:= $\177; Erase =:= $\^H ->
-    edit_line(Cs,Chars);
-edit_line([Char|Cs],Chars) ->
-    edit_line(Cs,[Char|Chars]).
+edit_line(eof, Chars, Rs) ->
+    {Chars,eof, lists:reverse(Rs)};
+edit_line([],Chars, Rs) ->
+    {Chars,[],lists:reverse(Rs)};
+edit_line([$\r,$\n|Cs],Chars, Rs) ->
+    {[$\n | Chars], remainder_after_nl(Cs), lists:reverse([{put_chars, unicode, "\n"}|Rs])};
+edit_line([NL|Cs],Chars, Rs) when NL =:= $\r; NL =:= $\n ->
+    {[$\n | Chars], remainder_after_nl(Cs), lists:reverse([{put_chars, unicode, "\n"}|Rs])};
+edit_line([Erase|Cs],[], Rs) when Erase =:= $\177; Erase =:= $\^H ->
+    edit_line(Cs,[], Rs);
+edit_line([Erase|Cs],[_|Chars], Rs) when Erase =:= $\177; Erase =:= $\^H ->
+    edit_line(Cs,Chars, [{delete_chars, -1}|Rs]);
+edit_line([CtrlChar|Cs],Chars, Rs) when CtrlChar < 32 ->
+    edit_line(Cs,Chars,Rs);
+edit_line([Char|Cs],Chars, Rs) ->
+    edit_line(Cs,[Char|Chars], [{put_chars, unicode, [Char]}|Rs]).
 
 remainder_after_nl("") -> done;
 remainder_after_nl(Cs) -> Cs.
@@ -1055,3 +1085,18 @@ append(eof, L, _) ->
     L;
 append(B, L, FromEnc) ->
     unicode:characters_to_list(B, FromEnc) ++ L.
+
+check_encoding(eof, _) ->
+    true;
+check_encoding(ListOrBinary, unicode) when is_list(ListOrBinary); is_binary(ListOrBinary) ->
+    true;
+check_encoding(List, latin1) when is_list(List) ->
+    is_latin1(List).
+
+is_latin1([H|T]) when 0 =< H, H =< 255 ->
+    is_latin1(T);
+is_latin1([]) ->
+    true;
+is_latin1(_) ->
+    false.
+

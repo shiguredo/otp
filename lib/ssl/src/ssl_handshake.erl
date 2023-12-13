@@ -2019,12 +2019,7 @@ supported_cert_type_or_empty(Algo, Type) ->
     end.
 
 certificate_authorities_from_db(CertDbHandle, CertDbRef) when is_reference(CertDbRef) ->
-    ConnectionCerts = fun({{Ref, _, _}, Cert}, Acc) when Ref  == CertDbRef ->
-			      [Cert | Acc];
-			 (_, Acc) ->
-			      Acc
-		      end,
-    ssl_pkix_db:foldl(ConnectionCerts, [], CertDbHandle);
+    ssl_pkix_db:select_certs_by_ref(CertDbRef, CertDbHandle);
 certificate_authorities_from_db(_CertDbHandle, {extracted, CertDbData}) ->
     %% Cache disabled, Ref contains data
     lists:foldl(fun({decoded, {_Key,Cert}}, Acc) -> [Cert | Acc] end,
@@ -2346,13 +2341,12 @@ master_secret(Version, MasterSecret,
 		 hash_size = HashSize,
 		 prf_algorithm = PrfAlgo,
 		 key_material_length = KML,
-		 expanded_key_material_length = EKML,
 		 iv_size = IVS},
 	      ConnectionStates, Role) ->
     {ClientWriteMacSecret, ServerWriteMacSecret, ClientWriteKey,
      ServerWriteKey, ClientIV, ServerIV} =
 	setup_keys(Version, PrfAlgo, MasterSecret, ServerRandom,
-		   ClientRandom, HashSize, KML, EKML, IVS),
+		   ClientRandom, HashSize, KML, IVS),
 
     ConnStates1 = ssl_record:set_master_secret(MasterSecret, ConnectionStates),
     ConnStates2 =
@@ -2365,9 +2359,9 @@ master_secret(Version, MasterSecret,
      ssl_record:set_pending_cipher_state(ConnStates2, ClientCipherState,
 					 ServerCipherState, Role)}.
 setup_keys(Version, PrfAlgo, MasterSecret,
-	   ServerRandom, ClientRandom, HashSize, KML, _EKML, IVS) when ?TLS_1_X(Version)->
+	   ServerRandom, ClientRandom, HashSize, KML, IVS) when ?TLS_1_X(Version)->
     tls_v1:setup_keys(Version, PrfAlgo, MasterSecret, ServerRandom, ClientRandom, HashSize,
-			KML, IVS).
+                      KML, IVS).
 calc_master_secret(Version, PrfAlgo, PremasterSecret, ClientRandom, ServerRandom)
   when ?TLS_LT(Version, ?TLS_1_3) ->
     tls_v1:master_secret(PrfAlgo, PremasterSecret, ClientRandom, ServerRandom).
@@ -3517,7 +3511,9 @@ is_supported_sign({Hash, Sign}, SignatureSchemes) ->
                            rsa_pkcs1 ->
                                rsa;
                            rsa_pss_rsae ->
-                               rsa; 
+                               rsa;
+                           ecdsa_sha1 ->
+                               ecdsa;
                            S ->
                                S
                        end,
@@ -3859,7 +3855,9 @@ path_validation(TrustedCert, Path, ServerName, Role, CertDbHandle, CertDbRef, CR
                                               cert_ext => CertExt,
                                               issuer => TrustedCert,
                                               ocsp_responder_certs => OcspResponderCerts,
-                                              ocsp_state => OcspState},
+                                              ocsp_state => OcspState,
+                                              path_len => length(Path)
+                                             },
                                  Path, Level),
     Options = [{max_path_length, maps:get(depth, Opts, ?DEFAULT_DEPTH)},
                {verify_fun, ValidationFunAndState}],

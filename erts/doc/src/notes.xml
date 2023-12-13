@@ -31,6 +31,178 @@
   </header>
   <p>This document describes the changes made to the ERTS application.</p>
 
+<section><title>Erts 14.2</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix erl.exe to to restore the console to its original
+	    state when exiting. This bug was introduced in OTP 26.0
+	    and only happens when erl.exe is run in cmd.exe.</p>
+          <p>
+	    Own Id: OTP-18751 Aux Id: GH-7621 GH-7548 </p>
+        </item>
+        <item>
+          <p>
+	    Fix faulty debug assert when page size is larger than
+	    16kb, like on PowerPC. Did crash debug VM directly at
+	    start.</p>
+          <p>
+	    Own Id: OTP-18802</p>
+        </item>
+        <item>
+	    <p><c>zlib</c> will no longer randomly return garbage
+	    (negative) Adler32 checksums.</p>
+          <p>
+	    Own Id: OTP-18811 Aux Id: ERIERL-994 </p>
+        </item>
+        <item>
+          <p>
+	    Replaced unintentional Erlang Public License 1.1 headers
+	    in some files with the intended Apache License 2.0
+	    header.</p>
+          <p>
+	    Own Id: OTP-18815 Aux Id: PR-7780 </p>
+        </item>
+        <item>
+          <p>
+	    A process with <c>message_queue_data</c> configured as
+	    <c>off_heap</c> could end up in an inconsistent state
+	    when being <c>receive</c> traced, inspected using
+	    <c>process_info/2</c> with the <c>message_queue_len</c>
+	    item, or inspected using the break menu (CTRL-C). When it
+	    ended up in this inconsistent state, it was not enqueued
+	    into a run queue even though it was set in a runnable
+	    state.This also effected signals being sent to the
+	    process after it had gotten into this inconsistent state,
+	    in such a way that it was from this point not possible to
+	    communicate with it.</p>
+          <p>
+	    Own Id: OTP-18838 Aux Id: PR-7822, GH-7801 </p>
+        </item>
+        <item>
+          <p>
+	    A race occurring when a process was selected for dirty
+	    execution simultaneously as it was scheduled for handling
+	    a signal could cause the process to end up in an
+	    inconsistent state. When it ended up in this inconsistent
+	    state, it was not enqueued into a run queue even though
+	    it was set in a runnable state. This also effected
+	    signals being sent to the process after it had gotten
+	    into this inconsistent state, in such a way that it was
+	    from this point not possible to communicate with it.</p>
+          <p>
+	    Own Id: OTP-18839 Aux Id: PR-7822, GH-7801 </p>
+        </item>
+        <item>
+          <p>
+	    When a process had to to wait in the run queue for a long
+	    time before being selected for dirty execution, it could
+	    not receive signals. This caused inspection of such a
+	    process, for example using <c>process_info/2</c>, to take
+	    a long time.</p>
+          <p>
+	    This issue was introduced in OTP 25.3.2.6 and 26.1 when
+	    fixing an issue where a constant flow of signals
+	    prevented a process from being able to execute dirty.</p>
+          <p>
+	    Own Id: OTP-18841 Aux Id: PR-7822, GH-7801, OTP-18737 </p>
+        </item>
+        <item>
+	    <p>Fixed a bug in the JIT that miscompiled large
+	    <c>select_val</c> instructions.</p>
+          <p>
+	    Own Id: OTP-18842</p>
+        </item>
+        <item>
+          <p>
+	    Fix bug on Windows where large writes to
+	    <c>standard_io</c> could cause duplicate data to be
+	    written.</p>
+          <p>
+	    Own Id: OTP-18871 Aux Id: GH-7838 </p>
+        </item>
+        <item>
+          <p>
+	    The <c>struct ip_mreqn</c> field <c>imr_ifindex</c> had
+	    got an incorrect byte order conversion that has been
+	    corrected.</p>
+          <p>
+	    Own Id: OTP-18880 Aux Id: GH-7736, PR-7761 </p>
+        </item>
+        <item>
+          <p>
+	    On OTP 24 and OTP 25, incoming distributed messages
+	    larger than 64 KiB sent using an alias leaked memory if
+	    the alias had been removed prior to entering the node.
+	    This issue was not present on OTP 26.</p>
+          <p>
+	    Incoming distributed messages larger than 64 KiB sent
+	    using an alias which had been removed on the receiving
+	    node could crash the node. This crash was quite unlikely
+	    on OTP 24 and OTP 25, but very likely on OTP 26.</p>
+          <p>
+	    <c>'DOWN'</c> signals with exit reason larger than 64 KiB
+	    directed towards a process on a node with a not matching
+	    creation leaked memory on the receiving node. Such
+	    signals should however be very rare.</p>
+          <p>
+	    Own Id: OTP-18885 Aux Id: GH-7834, GH-7890, PR-7915 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Add Windows support for DGRAM socket connect.</p>
+          <p>
+	    Own Id: OTP-18762</p>
+        </item>
+        <item>
+          <p>
+	    <seemfa
+	    marker="erlang#process_info/2"><c>process_info/2</c></seemfa>
+	    now supports lookup of values for specific keys in the
+	    process dictionary. For example, <c>{{dictionary, Key},
+	    Value} = process_info(Pid, {dictionary, Key})</c>.</p>
+          <p>
+	    Own Id: OTP-18765 Aux Id: PR-7707 </p>
+        </item>
+        <item>
+          <p>
+	    Removed unnecessary regexp library used when generating
+	    yielding BIFs.</p>
+          <p>
+	    Own Id: OTP-18830 Aux Id: PR-7823 </p>
+        </item>
+        <item>
+          <p>
+	    Fix tty restore when <c>+Bc</c> is used.</p>
+          <p>
+	    Own Id: OTP-18872 Aux Id: GH-7832 </p>
+        </item>
+        <item>
+          <p>
+	    Replaced old md5 implementation with an implementation
+	    from OpenSSL.</p>
+          <p>
+	    Own Id: OTP-18877</p>
+        </item>
+        <item>
+          <p>
+	    Removed unused <c>makewhatis</c> script.</p>
+          <p>
+	    Own Id: OTP-18899</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
 <section><title>Erts 14.1.1</title>
 
     <section><title>Fixed Bugs and Malfunctions</title>
@@ -979,6 +1151,55 @@
 	    Potential Incompatibilities</seeguide>.</p>
           <p>
 	    Own Id: OTP-18574</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Erts 13.2.2.4</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    If the external term format encoding of an argument list
+	    part of a distributed spawn operation was faulty, the
+	    newly spawned remote process could misbehave. The
+	    misbehavior included hanging or interpret an incoming
+	    message as an argument list to use. This was very
+	    unlikely to happen unless using an alternate
+	    implementation of the distribution protocol which made a
+	    faulty encoding of the argument list. The child process
+	    will now detect this error and terminate before executing
+	    the user specified code.</p>
+          <p>
+	    Own Id: OTP-18790 Aux Id: PR-7742 </p>
+        </item>
+        <item>
+	    <p>On Apple Silicon Macs running macOS Sonoma, the
+	    runtime system with the JIT enabled would crash.
+	    Therefore, the <c>configure</c> script will by default
+	    now disable the JIT on Macs with Apple Silicon. When
+	    building for earlier versions of macOS, the JIT can be
+	    explicitly enabled by passing <c>--enable-jit</c> to the
+	    <c>configure</c> script.</p>
+          <p>
+	    Own Id: OTP-18792 Aux Id: GH-7687 </p>
+        </item>
+        <item>
+          <p>
+	    Fix bugs where if the body of a matchspec would return a
+	    map with a variable ('$1', '$_' etc) as one of the keys
+	    or values and the variable was not an immidiate, the term
+	    would not be copied to the receiving processes heap. This
+	    would later corrupt the term in the table as the GC could
+	    place move markers in it, which in turn would cause the
+	    VM to crash.</p>
+          <p>
+	    Bug has been present for since OTP 17.0.</p>
+          <p>
+	    Own Id: OTP-18797 Aux Id: PR-7712 GH-7683 </p>
         </item>
       </list>
     </section>
@@ -2568,6 +2789,62 @@
 	    <c>F_BARRIERFSYNC</c> flag when available on Mac OS.</p>
           <p>
 	    Own Id: OTP-18038</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Erts 12.3.2.14</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix bug causing "magic" references in a <c>compressed</c>
+	    ETS table to not keep the referred object alive. The
+	    symptom would be the referred object being garbage
+	    collected prematurely and the reference appearing stale,
+	    not referring to anything. Examples of such magically
+	    referred objects are <c>atomics</c> and NIF resources.</p>
+          <p>
+	    Own Id: OTP-18732 Aux Id: GH-7444, PR-7458 </p>
+        </item>
+        <item>
+          <p>
+	    The cleanup operation of not yet delivered signals to a
+	    terminated process yielded excessively.</p>
+          <p>
+	    Own Id: OTP-18752 Aux Id: PR-7633 </p>
+        </item>
+        <item>
+          <p>
+	    If the external term format encoding of an argument list
+	    part of a distributed spawn operation was faulty, the
+	    newly spawned remote process could misbehave. The
+	    misbehavior included hanging or interpret an incoming
+	    message as an argument list to use. This was very
+	    unlikely to happen unless using an alternate
+	    implementation of the distribution protocol which made a
+	    faulty encoding of the argument list. The child process
+	    will now detect this error and terminate before executing
+	    the user specified code.</p>
+          <p>
+	    Own Id: OTP-18790 Aux Id: PR-7742 </p>
+        </item>
+        <item>
+          <p>
+	    Fix bugs where if the body of a matchspec would return a
+	    map with a variable ('$1', '$_' etc) as one of the keys
+	    or values and the variable was not an immidiate, the term
+	    would not be copied to the receiving processes heap. This
+	    would later corrupt the term in the table as the GC could
+	    place move markers in it, which in turn would cause the
+	    VM to crash.</p>
+          <p>
+	    Bug has been present for since OTP 17.0.</p>
+          <p>
+	    Own Id: OTP-18797 Aux Id: PR-7712 GH-7683 </p>
         </item>
       </list>
     </section>
@@ -4482,7 +4759,7 @@
 	    map in a single pass.</p>
           <p>
 	    <c>maps:from_keys/2</c> constructs a map from a list of
-	    keys and a single value and can be used to to optimize
+	    keys and a single value and can be used to optimize
 	    sets operations such as from_list/1, filter/2,
 	    intersection/2, and subtract/2.</p>
           <p>
@@ -8231,7 +8508,7 @@
         <item>
           <p>
 	    The Kernel application's User's Guide now contain a
-	    Logger Cookbook with with common usage patterns.</p>
+	    Logger Cookbook with common usage patterns.</p>
           <p>
 	    Own Id: OTP-16208</p>
         </item>
@@ -12030,7 +12307,7 @@
 	    been called, all exceptions will now contain the entry
 	    for <em>one</em> function (despite the zero). It used to
 	    be that a hand-made stack backtrace passed to
-	    <c>erlang:raise/3</c> would be be truncated to an empty
+	    <c>erlang:raise/3</c> would be truncated to an empty
 	    list.</p>
           <p>
 	    Own Id: OTP-15026</p>
@@ -20693,7 +20970,7 @@
           <p>
 	    The previous default of a maximum of 32768 simultaneous
 	    processes has been raised to 262144. This value can be
-	    changed using the the <seecom
+	    changed using the <seecom
 	    marker="erl#+P">+P</seecom> command line flag of
 	    <seecom marker="erl">erl(1)</seecom>. Note that the
 	    value passed now is considered as a hint, and that actual
@@ -21497,7 +21774,7 @@
         </item>
         <item>
 	    <p>Calling trace_info/2 asking for information about a
-	    function that had native could could crash the run-time
+	    function that had native could crash the run-time
 	    system.</p>
           <p>
 	    Own Id: OTP-9886</p>
@@ -25308,7 +25585,7 @@
         <item>
           <p>
 	    Emulator flags in an escript were earlier inherited to
-	    emulators started from from the emulator running the
+	    emulators started from the emulator running the
 	    escript. For example when an escript invoked
 	    <c>os:cmd("erl")</c>, the new emulator were given
 	    erroneous emulator flags. This bug has now been fixed</p>
@@ -26768,7 +27045,7 @@
 	    In the section about binary construction, the reference
 	    manual now mentions what happens when an integer value
 	    does not fit into an integer segment of size N (namely,
-	    that the N least significant bits will be put into into
+	    that the N least significant bits will be put into
 	    the binary and that the most significant bits will be
 	    silently discarded). (Thanks to Edwin Fine.)</p>
           <p>
@@ -29548,7 +29825,7 @@
         </item>
         <item>
           <p>The undocumented <c><![CDATA[{packet,http}]]></c> option (for the
-            <c><![CDATA[gen_tcp]]></c> module) did not not work correctly when
+            <c><![CDATA[gen_tcp]]></c> module) did not work correctly when
             there were multiple continuation lines. (Thanks to Per
             Hedeland.)</p>
           <p>Own Id: OTP-5945</p>
