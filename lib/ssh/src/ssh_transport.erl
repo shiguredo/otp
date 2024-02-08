@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2023. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -202,18 +202,16 @@ supported_algorithms() -> [{K,supported_algorithms(K)} || K <- algo_classes()].
 supported_algorithms(kex) ->
     select_crypto_supported(
       [
-       {'ecdh-sha2-nistp384',                   [{public_keys,ecdh}, {curves,secp384r1}, {hashs,sha384}]},
+       {'curve25519-sha256',                    [{public_keys,ecdh}, {curves,x25519}, {hashs,sha256}]},
+       {'curve25519-sha256@libssh.org',         [{public_keys,ecdh}, {curves,x25519}, {hashs,sha256}]},
+       {'curve448-sha512',                      [{public_keys,ecdh}, {curves,x448},   {hashs,sha512}]},
        {'ecdh-sha2-nistp521',                   [{public_keys,ecdh}, {curves,secp521r1}, {hashs,sha512}]},
+       {'ecdh-sha2-nistp384',                   [{public_keys,ecdh}, {curves,secp384r1}, {hashs,sha384}]},
        {'ecdh-sha2-nistp256',                   [{public_keys,ecdh}, {curves,secp256r1}, {hashs,sha256}]},
        {'diffie-hellman-group-exchange-sha256', [{public_keys,dh},   {hashs,sha256}]},
        {'diffie-hellman-group16-sha512',        [{public_keys,dh},   {hashs,sha512}]}, % In OpenSSH 7.3.p1
        {'diffie-hellman-group18-sha512',        [{public_keys,dh},   {hashs,sha512}]}, % In OpenSSH 7.3.p1
        {'diffie-hellman-group14-sha256',        [{public_keys,dh},   {hashs,sha256}]}, % In OpenSSH 7.3.p1
-       %% https://tools.ietf.org/html/draft-ietf-curdle-ssh-curves
-       %% Secure Shell (SSH) Key Exchange Method using Curve25519 and Curve448
-       {'curve25519-sha256',                    [{public_keys,ecdh}, {curves,x25519}, {hashs,sha256}]},
-       {'curve25519-sha256@libssh.org',         [{public_keys,ecdh}, {curves,x25519}, {hashs,sha256}]},
-       {'curve448-sha512',                      [{public_keys,ecdh}, {curves,x448},   {hashs,sha512}]},
        {'diffie-hellman-group14-sha1',          [{public_keys,dh},   {hashs,sha}]},
        {'diffie-hellman-group-exchange-sha1',   [{public_keys,dh},   {hashs,sha}]},
        {'diffie-hellman-group1-sha1',           [{public_keys,dh},   {hashs,sha}]}

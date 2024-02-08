@@ -2,7 +2,7 @@ dnl Process this file with autoconf to produce a configure script. -*-Autoconf-*
 
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 1997-2023. All Rights Reserved.
+dnl Copyright Ericsson AB 1997-2024. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -2865,7 +2865,22 @@ AS_IF([test ${enable_jit} != no],
   [
    case "$ARCH" in
         amd64)
-           JIT_ARCH=x86
+           case "$OPSYS" in
+              darwin)
+                # MacOS Sonoma introduced some very annoying popups when
+                # dual-mapping memory through the documented APIs, and we did
+                # not wish to start using undocumented functionality in a patch
+                # release, so we have disabled the JIT on this platform.
+                #
+                # The ARM JIT is unaffected because it uses per-thread
+                # permissions instead of dual-mapped memory.
+                enable_jit=no
+                AC_MSG_WARN([JIT disabled due to lack to support on x86 Macs])
+                ;;
+              *)
+                JIT_ARCH=x86
+                ;;
+           esac
            ;;
         arm64)
            case "$OPSYS" in

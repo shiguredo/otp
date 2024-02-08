@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2006-2023. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1809,8 +1809,15 @@ get_timeout_timespec(ErtsPollSet *ps,
     }
     else {
 	ErtsMonotonicTime sec = timeout/(1000*1000*1000);
-	tsp->tv_sec = sec;
-	tsp->tv_nsec = timeout - sec*(1000*1000*1000);
+        if (sizeof(tsp->tv_sec) == 8
+            || sec <= (ErtsMonotonicTime) INT_MAX) {
+            tsp->tv_sec = sec;
+            tsp->tv_nsec = timeout - sec*(1000*1000*1000);
+        }
+        else {
+            tsp->tv_sec = INT_MAX;
+            tsp->tv_nsec = 0;
+        }
 
 	ASSERT(tsp->tv_sec >= 0);
 	ASSERT(tsp->tv_nsec >= 0);

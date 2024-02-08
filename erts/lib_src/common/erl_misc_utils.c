@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2006-2023. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@
 #    include <sys/select.h>
 #  endif
 #  include <time.h>
-#  if HAVE_SYS_TIME_H
+#  ifdef HAVE_SYS_TIME_H
 #    include <sys/time.h>
 #  endif
 #  include <string.h>
