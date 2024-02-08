@@ -371,6 +371,12 @@ expr({call,Anno,{remote,_,{atom,_,erlang},{atom,_,is_record}},
 expr({call,Anno,{tuple,_,[{atom,_,erlang},{atom,_,is_record}]},
       [A,{atom,_,Name}]}, St) ->
     record_test(Anno, A, Name, St);
+expr({call,Anno,{atom,_,is_record},[_,_,{integer,_,Sz}]}, St)
+  when is_integer(Sz), Sz =< 0 ->
+    {{atom,Anno,false},St};
+expr({call,Anno,{remote,_,{atom,_,erlang},{atom,_,is_record}},
+      [_,_,{integer,_,Sz}]}, St) when is_integer(Sz), Sz =< 0 ->
+    {{atom,Anno,false},St};
 expr({call,Anno,{atom,_AnnoA,record_info},[_,_]=As0}, St0) ->
     {As,St1} = expr_list(As0, St0),
     record_info_call(Anno, As, St1);
@@ -520,9 +526,12 @@ lc_tq(Anno, [{b_generate,AnnoG,P0,G0} | Qs0], St0) ->
     {[{b_generate,AnnoG,P1,G1} | Qs1],St3};
 lc_tq(Anno, [{m_generate,AnnoG,P0,G0} | Qs0], St0) ->
     {G1,St1} = expr(G0, St0),
-    {P1,St2} = pattern(P0, St1),
-    {Qs1,St3} = lc_tq(Anno, Qs0, St2),
-    {[{m_generate,AnnoG,P1,G1} | Qs1],St3};
+    {map_field_exact,AnnoMFE,KeyP0,ValP0} = P0,
+    {KeyP1,St2} = pattern(KeyP0, St1),
+    {ValP1,St3} = pattern(ValP0, St2),
+    {Qs1,St4} = lc_tq(Anno, Qs0, St3),
+    P1 = {map_field_exact,AnnoMFE,KeyP1,ValP1},
+    {[{m_generate,AnnoG,P1,G1} | Qs1],St4};
 lc_tq(Anno, [F0 | Qs0], #exprec{calltype=Calltype,raw_records=Records}=St0) ->
     %% Allow record/2 and expand out as guard test.
     IsOverriden = fun(FA) ->
@@ -919,11 +928,13 @@ opt_rec_vars_2({op,_,'orelse',Arg,{atom,_,fail}}, Rs) ->
     %% Since the second argument guarantees failure,
     %% it is safe to inspect the first argument.
     opt_rec_vars_2(Arg, Rs);
-opt_rec_vars_2({call,_,{remote,_,{atom,_,erlang},{atom,_,is_record}},
-		[{var,_,V},{atom,_,Tag},{integer,_,Sz}]}, Rs) ->
-    orddict:store(V, {Tag,Sz}, Rs);
+opt_rec_vars_2({call,Anno,
+                {remote,_,{atom,_,erlang},{atom,_,is_record}=IsRecord},
+		Args}, Rs) ->
+    opt_rec_vars_2({call,Anno,IsRecord,Args}, Rs);
 opt_rec_vars_2({call,_,{atom,_,is_record},
-		[{var,_,V},{atom,_,Tag},{integer,_,Sz}]}, Rs) ->
+		[{var,_,V},{atom,_,Tag},{integer,_,Sz}]}, Rs)
+  when is_integer(Sz), 0 < Sz, Sz < 100 ->
     orddict:store(V, {Tag,Sz}, Rs);
 opt_rec_vars_2(_, Rs) -> Rs.
 

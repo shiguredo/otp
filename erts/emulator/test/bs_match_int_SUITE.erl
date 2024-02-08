@@ -112,7 +112,7 @@ get_int(Bin0) ->
     %% Note that it has become impossible to create a byte-sized sub
     %% binary (see erts_extract_sub_binary() in erl_bits.c) of size 64
     %% or less. Therefore, to be able to create an unaligned binary,
-    %% we'll need to base it on on a binary with more than 64 bytes.
+    %% we'll need to base it on a binary with more than 64 bytes.
     Size = bit_size(Bin0),
     Filler = rand:bytes(65),
     UnsignedBigBin = id(<<Filler/binary,Bin0/bits>>),
@@ -846,6 +846,8 @@ match_huge_int(Config) when is_list(Config) ->
         bs_match_int_SUITE ->
             do_match_huge_int();
         bs_match_int_r25_SUITE ->
+            do_match_huge_int();
+        bs_match_int_stripped_types_SUITE ->
             do_match_huge_int()
     end.
 

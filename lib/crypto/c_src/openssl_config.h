@@ -232,7 +232,7 @@
 # define HAVE_DH
 #endif
 
-#ifndef OPENSSL_NO_DSA
+#if !defined(OPENSSL_NO_DSA) && !(HAS_LIBRESSL_VSN >= 0x2060100fL)
 # define HAVE_DSA
 #endif
 
@@ -322,6 +322,13 @@
 # endif
 #endif
 
+#ifdef HAS_LIBRESSL
+# if LIBRESSL_VERSION_NUMBER >= 0x3070000fL
+#   define HAVE_CHACHA20_POLY1305
+#   define HAVE_CHACHA20
+# endif
+#endif
+
 #if OPENSSL_VERSION_NUMBER <= PACKED_OPENSSL_VERSION(0,9,8,'l')
 # define HAVE_ECB_IVEC_BUG
 # define HAVE_UPDATE_EMPTY_DATA_BUG
@@ -345,9 +352,7 @@
 /* If OPENSSL_NO_EC is set, there will be an error in ec.h included from engine.h
    So if EC is disabled, you can't use Engine either....
 */
-#if !defined(OPENSSL_NO_ENGINE) && \
-    !defined(HAS_3_0_API)
-/* Disable FIPS for 3.0 temporaryly until the support is added (might core dump) */
+#if !defined(OPENSSL_NO_ENGINE)
 # define HAS_ENGINE_SUPPORT
 #endif
 #endif
@@ -465,12 +470,6 @@ do {                                                    \
 /* FIPS is not supported for versions < 1.0.1.  If FIPS_SUPPORT is enabled
    there are some warnings/errors for thoose
 */
-# undef FIPS_SUPPORT
-#endif
-
-/* Disable FIPS for 3.0 temporaryly until the support is added */
-#if defined(FIPS_SUPPORT) &&                                            \
-    defined(HAS_3_0_API)
 # undef FIPS_SUPPORT
 #endif
 

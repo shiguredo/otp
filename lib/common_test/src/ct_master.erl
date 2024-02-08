@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2018. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -557,7 +557,7 @@ refresh_logs([D|Dirs],Refreshed) ->
 		    refresh_logs(Dirs,Refreshed);
 		false ->
 		    {ok,Cwd} = file:get_cwd(),
-		    case catch ct_run:refresh_logs(D) of
+		    case catch ct_run:refresh_logs(D, unknown) of
 			{'EXIT',Reason} ->
 			    ok = file:set_cwd(Cwd),
 			    refresh_logs(Dirs,[{D,{error,Reason}}|Refreshed]);

@@ -200,7 +200,9 @@ typedef struct {
     Uint reserve_size;
     Uint len;
     int flags;
-    int item_ix[1]; /* of len size in reality... */
+    int *item_ix;
+    Eterm *item_extra;
+    ErlHeapFragment *extra_hfrag;
 } ErtsProcessInfoSig;
 
 #define ERTS_PROC_SIG_PI_MSGQ_LEN_IGNORE        ((Sint) -1)
@@ -276,6 +278,8 @@ static void handle_missing_spawn_reply(Process *c_p, ErtsMonitor *omon);
 static Uint proc_sig_queue_flush_buffer(Process* proc,
                                         Uint buffer_index,
                                         ErtsSignalInQueueBufferArray* buffers);
+static void proc_sig_queue_flush_buffers(Process *proc,
+                                         ErtsSignalInQueueBufferArray *buffers);
 static void proc_sig_queue_lock_buffer(ErtsSignalInQueueBuffer* slot);
 static void proc_sig_queue_unlock_buffer(ErtsSignalInQueueBuffer* slot);
 
@@ -296,7 +300,8 @@ static void proc_sig_queue_unlock_buffer(ErtsSignalInQueueBuffer* slot);
                                   nm_last__,                    \
                                   (T),                          \
                                   NULL,                         \
-                                  ERTS_PSFLG_FREE);             \
+                                  0,                            \
+                                  0);                           \
     } while (0);
 static Sint
 proc_sig_hdbg_check_queue(Process *c_p,
@@ -307,7 +312,8 @@ proc_sig_hdbg_check_queue(Process *c_p,
                           ErtsMessage **sig_nm_last,
                           ErtsSigRecvTracing *tracing,
                           int *found_saved_last_p,
-                          erts_aint32_t sig_psflg);
+                          erts_aint32_t nmsig_psflg,
+                          erts_aint32_t msig_psflg);
 #else
 #define ERTS_PROC_SIG_HDBG_PRIV_CHKQ(P, T, NMN)
 #endif
@@ -505,6 +511,14 @@ destroy_sig_group_leader(ErtsSigGroupLeader *sgl)
     erts_free(ERTS_ALC_T_SIG_DATA, sgl);
 }
 
+static void
+destroy_process_info_sig(ErtsProcessInfoSig *pis)
+{
+    if (pis->extra_hfrag)
+        erts_cleanup_offheap(&pis->extra_hfrag->off_heap);
+    erts_free(ERTS_ALC_T_SIG_DATA, pis);
+}
+
 static ERTS_INLINE void
 sig_enqueue_trace(ErtsPTabElementCommon *sender, Eterm from,
                   ErtsMessage **sigp, int op, Process *rp,
@@ -674,66 +688,76 @@ static int dbg_check_non_msg(ErtsSignalInQueue* q)
 }
 #endif /* ERTS_PROC_SIG_HARD_DEBUG_SIGQ_BUFFERS */
 
+
+/**
+ * @brief Enqueue a sequence of signals on an *in* signal queue.
+ *
+ * The *only* valid scenarios:
+ * * One or more message signals and no non-message signals.
+ * * One non-message signal followed by one or more message signals
+ * * One or more non-message signals and no message signals.
+ *
+ * Appart from next pointers between the signals in the sequence also:
+ * * next pointer pointers between non-message signals must have been
+ *   correctly set up.
+ *
+ * @param is_to_buffer       Non-zero if not enqueue on processes in signal
+ *                           queue.
+ * @param rp[in]             Process to which the in signal queue belong.
+ * @param first[in]          Pointer to the first signal in signal sequence.
+ * @param last[in]           Pointer to the next pointer of the last signal
+ *                           in the sequence. This next pointer should equal
+ *                           NULL.
+ * @param last_next[in]      Pointer to the next pointer which points to the
+ *                           last signal in the sequence if more than one
+ *                           non-message signal is in the sequence. NULL if
+ *                           no or only one non-message signal in the seqence.
+ * @param state[in]          State of rp upon call. This state *must* have
+ *                           been while holding the msgq lock or buffer lock
+ *                           prior to calling this function.
+ * @param dest_queue         In signal queue to enqueue on. This might
+ *                           be the in signal queue of rp or an in signal
+ *                           queue buffer of rp. The in signal queue has to
+ *                           be apropriately locked when calling
+ *                           enqueue_signals() by the caller.
+ *
+ * @return                   Possibly changed state of rp.
+ */
 static ERTS_INLINE erts_aint32_t
-enqueue_signals(Process *rp, ErtsMessage *first,
+enqueue_signals(int is_to_buffer, Process *rp, ErtsMessage *first,
                 ErtsMessage **last, ErtsMessage **last_next,
                 Uint num_msgs,
                 erts_aint32_t state,
                 ErtsSignalInQueue* dest_queue)
 {
     ErtsMessage **this;
-    int is_to_buffer = dest_queue != &rp->sig_inq;
+    erts_aint32_t set_flags;
+    int nmsig = ERTS_SIG_IS_NON_MSG(first);
     int flush_buffers = (!is_to_buffer) && (state & ERTS_PSFLG_OFF_HEAP_MSGQ);
+
+    ASSERT(!!is_to_buffer == (dest_queue != &rp->sig_inq));
 
     if (flush_buffers) {
         erts_proc_sig_queue_flush_buffers(rp);
-#ifdef DEBUG
-        /*
-         * The following read is necessary to prevent
-         * ASSERT(is_to_buffer || state & ERTS_PSFLG_SIG_IN_Q) assert
-         * below from failing.
-         */
-        state = erts_atomic32_read_nob(&rp->state);
-#endif
     }
 
     this = dest_queue->last;
 
-    if (!is_to_buffer) {
-        ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(rp);
-    }
+    ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(rp, dest_queue);
 
     ASSERT(!*this);
     *this = first;
     dest_queue->last = last;
 
+    set_flags = num_msgs ? ERTS_PSFLG_MSG_SIG_IN_Q : 0;
+
     if (!dest_queue->nmsigs.next) {
         ASSERT(!dest_queue->nmsigs.last);
-        if (ERTS_SIG_IS_NON_MSG(first)) {
+        if (nmsig) {
             dest_queue->nmsigs.next = this;
-        }
-        else if (last_next) {
-            ASSERT(first->next && ERTS_SIG_IS_NON_MSG(first->next));
-            dest_queue->nmsigs.next = &first->next;
-        }
-        else
-            goto no_nmsig;
-        if (is_to_buffer) {
-            /*
-             * Check state first to avoid write overhead when it is
-             * unnecessary.
-             */
-            if ( ! (state & ERTS_PSFLG_SIG_IN_Q)) {
-                state = erts_atomic32_read_bor_relb(&rp->state,
-                                                    ERTS_PSFLG_SIG_IN_Q);
-            }
-        } else {
-            state = erts_atomic32_read_bor_nob(&rp->state,
-                                               ERTS_PSFLG_SIG_IN_Q);
+            set_flags |= ERTS_PSFLG_NMSG_SIG_IN_Q;
         }
 
-    no_nmsig:
-        ;
     }
     else {
         ErtsSignal *sig;
@@ -742,21 +766,31 @@ enqueue_signals(Process *rp, ErtsMessage *first,
         sig = (ErtsSignal *) *dest_queue->nmsigs.last;
 
         ASSERT(sig && !sig->common.specific.next);
-        ASSERT(is_to_buffer || state & ERTS_PSFLG_SIG_IN_Q);
-        if (ERTS_SIG_IS_NON_MSG(first)) {
+        if (nmsig) {
             sig->common.specific.next = this;
         }
-        else if (last_next) {
-            ASSERT(first->next && ERTS_SIG_IS_NON_MSG(first->next));
-            sig->common.specific.next = &first->next;
-        }
     }
+
+    if ((state & set_flags) != set_flags)
+        state = erts_atomic32_read_bor_nob(&rp->state, set_flags);
+
+#ifdef DEBUG
+    if (!is_to_buffer) {
+        erts_aint32_t a = erts_atomic32_read_nob(&rp->state);
+        erts_aint32_t e = 0;
+        if (num_msgs)
+            e |= ERTS_PSFLG_MSG_SIG_IN_Q;
+        if (nmsig)
+            e |= ERTS_PSFLG_NMSG_SIG_IN_Q;
+        ASSERT((a & e) == e);
+    }
+#endif
 
     if (last_next) {
         ASSERT(dbg_count_nmsigs(first) >= 2);
         dest_queue->nmsigs.last = last_next;
     }
-    else if (ERTS_SIG_IS_NON_MSG(first)) {
+    else if (nmsig) {
         ASSERT(dbg_count_nmsigs(first) == 1);
         dest_queue->nmsigs.last = this;
     }
@@ -765,31 +799,29 @@ enqueue_signals(Process *rp, ErtsMessage *first,
 
     dest_queue->len += num_msgs;
 
-    if (!is_to_buffer) {
-        ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(rp);
-    }
+    ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(rp, dest_queue);
 
     return state;
 }
 
 erts_aint32_t erts_enqueue_signals(Process *rp, ErtsMessage *first,
-                                   ErtsMessage **last, ErtsMessage **last_next,
-                                   Uint num_msgs,
+                                   ErtsMessage **last, Uint num_msgs,
                                    erts_aint32_t in_state)
 {
-    return enqueue_signals(rp, first, last, last_next, num_msgs, in_state, &rp->sig_inq);
+    return enqueue_signals(0, rp, first, last, NULL, num_msgs, in_state,
+                           &rp->sig_inq);
 }
 
-void
-erts_make_dirty_proc_handled(Eterm pid,
-                             erts_aint32_t state,
-                             erts_aint32_t prio)
+static ERTS_INLINE void
+notify_dirty_signal_handler(Eterm pid,
+                            erts_aint32_t state,
+                            erts_aint32_t prio)
 {
     Eterm *hp;
     ErtsMessage *mp;
     Process *sig_handler;
 
-    ASSERT(state & ERTS_PSFLG_DIRTY_RUNNING);
+    ASSERT(state & (ERTS_PSFLGS_DIRTY_WORK|ERTS_PSFLG_DIRTY_RUNNING));
 
     if (prio < 0)
         prio = (int) ERTS_PSFLGS_GET_USR_PRIO(state);
@@ -809,6 +841,71 @@ erts_make_dirty_proc_handled(Eterm pid,
     /* Make sure signals are handled... */
     mp = erts_alloc_message(0, &hp);
     erts_queue_message(sig_handler, 0, mp, pid, am_system);
+}
+
+typedef struct {
+    Eterm pid;
+    erts_aint32_t prio;
+} ErtsDirtySignalHandlerNotification;
+
+static void
+delayed_notify_dirty_signal_handler(void *vdshnp)
+{
+    ErtsDirtySignalHandlerNotification *dshnp
+        = (ErtsDirtySignalHandlerNotification *) vdshnp;
+    Process *proc;
+
+    ASSERT(dshnp);
+
+    proc = erts_proc_lookup(dshnp->pid);
+    if (proc) {
+        erts_aint32_t state = erts_atomic32_read_acqb(&proc->state);
+        /*
+         * Notify the dirty signal handler if it is still scheduled
+         * or running dirty and still have signals to handle...
+         */
+        if (ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state)) {
+            notify_dirty_signal_handler(dshnp->pid, state, dshnp->prio);
+        }
+    }
+    erts_free(ERTS_ALC_T_DSIG_HNDL_NTFY, vdshnp);
+}
+
+void
+erts_ensure_dirty_proc_signals_handled(Process *proc,
+                                       erts_aint32_t state,
+                                       erts_aint32_t prio,
+                                       ErtsProcLocks locks)
+{
+    /*
+     * All minor locks need to be accurately reported...
+     */
+    ERTS_LC_ASSERT((locks & ERTS_PROC_LOCKS_ALL_MINOR)
+                   == (erts_proc_lc_my_proc_locks(proc)
+                       & ERTS_PROC_LOCKS_ALL_MINOR));
+
+    if (!(locks & ERTS_PROC_LOCKS_ALL_MINOR)) {
+        notify_dirty_signal_handler(proc->common.id, state, prio);
+    }
+    else {
+        /*
+         * We need to schedule the notification since we cannot
+         * safely acquire the msgq lock on the dirty signal
+         * handler process while other minor process locks are
+         * held...
+         */
+        ErtsSchedulerData *esdp = erts_get_scheduler_data();
+        int tid = esdp && esdp->type == ERTS_SCHED_NORMAL ? (int) esdp->no : 1;
+        ErtsDirtySignalHandlerNotification *dshnp =
+            (ErtsDirtySignalHandlerNotification *)
+            erts_alloc(ERTS_ALC_T_DSIG_HNDL_NTFY,
+                       sizeof(ErtsDirtySignalHandlerNotification));
+        dshnp->pid = proc->common.id;
+        dshnp->prio = prio;
+        erts_schedule_misc_aux_work(tid,
+                                    delayed_notify_dirty_signal_handler,
+                                    (void *) dshnp);
+    }
 }
 
 static void
@@ -929,8 +1026,8 @@ proc_queue_signal(ErtsPTabElementCommon *sender, Eterm from, Eterm pid,
 first_last_done:
 
     if ((void *) sender == (void *) rp)
-	(void) erts_atomic32_read_bor_nob(&((Process *) sender)->state,
-					  ERTS_PSFLG_MAYBE_SELF_SIGS);
+	(void) erts_atomic32_read_bor_nob(&((Process *) sender)->xstate,
+					  ERTS_PXSFLG_MAYBE_SELF_SIGS);
 
     sig->common.specific.next = NULL;
 
@@ -941,8 +1038,7 @@ first_last_done:
 
     if (!force_flush && op != ERTS_SIG_Q_OP_PROCESS_INFO &&
         erts_proc_sig_queue_try_enqueue_to_buffer(from, rp, 0, first,
-                                                  &last->next, last_next,
-                                                  0, 1)) {
+                                                  &last->next, last_next, 0)) {
         if (!is_normal_sched) {
             erts_proc_dec_refc(rp);
         }
@@ -963,7 +1059,7 @@ first_last_done:
     if (ERTS_PSFLG_FREE & state) {
         res = 0;
     } else {
-        state = enqueue_signals(rp, first, &last->next,
+        state = enqueue_signals(0, rp, first, &last->next,
                                 last_next, 0, state,
                                 &rp->sig_inq);
         if (ERTS_UNLIKELY(op == ERTS_SIG_Q_OP_PROCESS_INFO))
@@ -1052,129 +1148,271 @@ maybe_elevate_sig_handling_prio(Process *c_p, int prio, Eterm other)
             if (res) {
                 /* ensure handled if dirty executing... */
                 state = erts_atomic32_read_nob(&rp->state);
-                /*
-                 * We ignore ERTS_PSFLG_DIRTY_RUNNING_SYS. For
-                 * more info see erts_execute_dirty_system_task()
-                 * in erl_process.c.
-                 */
-                if (state & ERTS_PSFLG_DIRTY_RUNNING)
-                    erts_make_dirty_proc_handled(other, state, min_prio);
+                if (ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state))
+                    erts_ensure_dirty_proc_signals_handled(rp, state,
+                                                           min_prio, 0);
             }
         }
     }
     return res;
 }
 
+typedef struct {
+    Eterm pid;
+    int nmsig;
+    int msig;
+} ErtsSchedSignalNotify;
+
+static void
+sched_sig_notify(void *vssnp);
+
 void
-erts_proc_sig_fetch__(Process *proc)
+erts_proc_sig_fetch__(Process *proc,
+                      ErtsSignalInQueueBufferArray *buffers,
+                      int need_unget_buffers)
 {
-    ASSERT(proc->sig_inq.first);
+    const erts_aint32_t clear_flags = (ERTS_PSFLG_MSG_SIG_IN_Q
+                                       | ERTS_PSFLG_NMSG_SIG_IN_Q);
+    erts_aint32_t set_flags = 0;
 
-    if (!proc->sig_inq.nmsigs.next) {
-        ASSERT(!proc->sig_inq.nmsigs.last);
+    if (buffers)
+        proc_sig_queue_flush_buffers(proc, buffers);
+    if (!proc->sig_inq.first) {
+        /*
+         * 'clear_flags' may be set even though in-queue is empty and
+         * if so needs to be cleared...
+         */
+        if (!(clear_flags & erts_atomic32_read_nob(&proc->state))) {
+            if (buffers)
+                goto unget_buffers_return;
+            return;
+        }
+        /*
+         * This can only happen when buffers are used. However, they may
+         * recently have been used but just been uninstalled, so we must be
+         * prepared for this scenario also without buffers installed...
+         */
+    }
+    else {
 
-        if (proc->sig_qs.cont || ERTS_MSG_RECV_TRACED(proc)) {
+        if (!proc->sig_inq.nmsigs.next) {
+            ASSERT(!proc->sig_inq.nmsigs.last);
+
+            if (!proc->sig_qs.cont && !ERTS_MSG_RECV_TRACED(proc)) {
+                *proc->sig_qs.last = proc->sig_inq.first;
+                proc->sig_qs.last = proc->sig_inq.last;
+            }
+            else {
+                *proc->sig_qs.cont_last = proc->sig_inq.first;
+                proc->sig_qs.cont_last = proc->sig_inq.last;
+                set_flags = ERTS_PSFLG_SIG_Q;
+            }
+        }
+        else {
+            ASSERT(proc->sig_inq.nmsigs.last);
+            if (!proc->sig_qs.nmsigs.last) {
+                ASSERT(!proc->sig_qs.nmsigs.next);
+                if (proc->sig_inq.nmsigs.next == &proc->sig_inq.first)
+                    proc->sig_qs.nmsigs.next = proc->sig_qs.cont_last;
+                else
+                    proc->sig_qs.nmsigs.next = proc->sig_inq.nmsigs.next;
+
+                set_flags = ERTS_PSFLG_SIG_Q;
+            }
+            else {
+                ErtsSignal *sig;
+                ASSERT(proc->sig_qs.nmsigs.next);
+                sig = ((ErtsSignal *) *proc->sig_qs.nmsigs.last);
+                ASSERT(ERTS_SIG_IS_NON_MSG(sig));
+                ASSERT(!sig->common.specific.next);
+                if (proc->sig_inq.nmsigs.next == &proc->sig_inq.first)
+                    sig->common.specific.next = proc->sig_qs.cont_last;
+                else
+                    sig->common.specific.next = proc->sig_inq.nmsigs.next;
+            }
+            if (proc->sig_inq.nmsigs.last == &proc->sig_inq.first)
+                proc->sig_qs.nmsigs.last = proc->sig_qs.cont_last;
+            else
+                proc->sig_qs.nmsigs.last = proc->sig_inq.nmsigs.last;
+            proc->sig_inq.nmsigs.next = NULL;
+            proc->sig_inq.nmsigs.last = NULL;
+
             *proc->sig_qs.cont_last = proc->sig_inq.first;
             proc->sig_qs.cont_last = proc->sig_inq.last;
         }
-        else {
-            *proc->sig_qs.last = proc->sig_inq.first;
-            proc->sig_qs.last = proc->sig_inq.last;
-        }
+
+        proc->sig_qs.len += proc->sig_inq.len;
+
+        proc->sig_inq.first = NULL;
+        proc->sig_inq.last = &proc->sig_inq.first;
+        proc->sig_inq.len = 0;
+    }
+
+    ASSERT((set_flags & clear_flags) == 0);
+
+    if (!buffers) {
+        (void) (!set_flags
+                ? erts_atomic32_read_band_nob(&proc->state,
+                                              ~clear_flags)
+                : erts_atomic32_read_bset_nob(&proc->state,
+                                              set_flags | clear_flags,
+                                              set_flags));
     }
     else {
-        erts_aint32_t s;
-        ASSERT(proc->sig_inq.nmsigs.last);
-         if (!proc->sig_qs.nmsigs.last) {
-            ASSERT(!proc->sig_qs.nmsigs.next);
-            if (proc->sig_inq.nmsigs.next == &proc->sig_inq.first)
-                proc->sig_qs.nmsigs.next = proc->sig_qs.cont_last;
-            else
-                proc->sig_qs.nmsigs.next = proc->sig_inq.nmsigs.next;
-
-            erts_atomic32_read_bset_nob(&proc->state,
-                                        (ERTS_PSFLG_SIG_Q
-                                         | ERTS_PSFLG_SIG_IN_Q),
-                                        ERTS_PSFLG_SIG_Q);
+        (void) (!set_flags
+                ? erts_atomic32_read_band_acqb(&proc->state,
+                                               ~clear_flags)
+                : erts_atomic32_read_bset_acqb(&proc->state,
+                                               set_flags | clear_flags,
+                                               set_flags));
+        if (erts_atomic64_read_acqb(&buffers->nonempty_slots)) {
+            set_flags = 0;
+            /*
+             * We raced with a signal being inserted into a buffer;
+             * need to adjust accordingly. Note that 'nonmsgs_in_slots'
+             * or 'msgs_in_slots' may be set even though corresponding
+             * signals aren't present in the buffers. This will however
+             * sort itself out when no such signals appears in a
+             * future call to erts_proc_sig_fetch().
+             */
+            if (erts_atomic32_read_nob(&buffers->nonmsgs_in_slots))
+                set_flags |= ERTS_PSFLG_NMSG_SIG_IN_Q;
+            if (erts_atomic32_read_nob(&buffers->msgs_in_slots))
+                set_flags |= ERTS_PSFLG_MSG_SIG_IN_Q;
+            if (set_flags) {
+                erts_aint32_t oflgs;
+                oflgs = erts_atomic32_read_bor_relb(&proc->state, set_flags);
+                if ((oflgs & (ERTS_PSFLG_NMSG_SIG_IN_Q
+                              | ERTS_PSFLG_MSG_SIG_IN_Q)) != set_flags) {
+                    int msig = 0, nmsig = 0;
+                    /*
+                     * We did set at least one of the flags; check if we may
+                     * need to set corresponding active flag(s)...
+                     */
+                    if ((!!(set_flags & ERTS_PSFLG_NMSG_SIG_IN_Q))
+                        & (!(oflgs & (ERTS_PSFLG_NMSG_SIG_IN_Q
+                                      | ERTS_PSFLG_ACTIVE_SYS)))) {
+                        /* We set nmsig-in-q flag and active-sys missing... */
+                        nmsig = !0;
+                    }
+                    if ((!!(set_flags & ERTS_PSFLG_MSG_SIG_IN_Q))
+                        & (!(oflgs & (ERTS_PSFLG_MSG_SIG_IN_Q
+                                      | ERTS_PSFLG_ACTIVE)))) {
+                        /* We set msig-in-q flag and active missing... */
+                        msig = !0;
+                    }
+                    if (msig | nmsig) {
+                        /*
+                         * We don't know exactly what locks we got, so
+                         * we need to schedule the notification...
+                         */
+                        ErtsSchedulerData *esdp = erts_get_scheduler_data();
+                        int tid = (esdp && esdp->type == ERTS_SCHED_NORMAL
+                                   ? (int) esdp->no
+                                   : 1);
+                        ErtsSchedSignalNotify *ssnp =
+                            (ErtsSchedSignalNotify *)
+                            erts_alloc(ERTS_ALC_T_SCHD_SIG_NTFY,
+                                       sizeof(ErtsSchedSignalNotify));
+                        ssnp->nmsig = nmsig;
+                        ssnp->msig = msig;
+                        ssnp->pid = proc->common.id;
+                        erts_schedule_misc_aux_work(tid,
+                                                    sched_sig_notify,
+                                                    (void *) ssnp);
+                    }
+                }
+            }
+            /* else:
+             *       Another thread is currently operating on a buffer and
+             *       will soon set appropriate.
+             */
         }
-        else {
-            ErtsSignal *sig;
-            ASSERT(proc->sig_qs.nmsigs.next);
-            sig = ((ErtsSignal *) *proc->sig_qs.nmsigs.last);
-            ASSERT(ERTS_SIG_IS_NON_MSG(sig));
-            ASSERT(!sig->common.specific.next);
-            if (proc->sig_inq.nmsigs.next == &proc->sig_inq.first)
-                sig->common.specific.next = proc->sig_qs.cont_last;
-            else
-                sig->common.specific.next = proc->sig_inq.nmsigs.next;
-
-            s = erts_atomic32_read_band_nob(&proc->state,
-                                            ~ERTS_PSFLG_SIG_IN_Q);
-
-            ASSERT((s & (ERTS_PSFLG_SIG_Q|ERTS_PSFLG_SIG_IN_Q))
-                   == (ERTS_PSFLG_SIG_Q|ERTS_PSFLG_SIG_IN_Q)); (void)s;
-        }
-        if (proc->sig_inq.nmsigs.last == &proc->sig_inq.first)
-            proc->sig_qs.nmsigs.last = proc->sig_qs.cont_last;
-        else
-            proc->sig_qs.nmsigs.last = proc->sig_inq.nmsigs.last;
-        proc->sig_inq.nmsigs.next = NULL;
-        proc->sig_inq.nmsigs.last = NULL;
-
-        *proc->sig_qs.cont_last = proc->sig_inq.first;
-        proc->sig_qs.cont_last = proc->sig_inq.last;
+    unget_buffers_return:
+        erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
     }
+}
 
-    proc->sig_qs.len += proc->sig_inq.len;
-
-    proc->sig_inq.first = NULL;
-    proc->sig_inq.last = &proc->sig_inq.first;
-    proc->sig_inq.len = 0;
-
+static void
+sched_sig_notify(void *vssnp)
+{
+    ErtsSchedSignalNotify *ssnp = (ErtsSchedSignalNotify *) vssnp;
+    Process *proc = erts_proc_lookup(ssnp->pid);
+    if (proc) {
+        erts_aint32_t state = erts_atomic32_read_acqb(&proc->state);
+        int nmsig = ssnp->nmsig;
+        int msig = ssnp->msig;
+        ASSERT(nmsig || msig);
+        if ((!!nmsig) & ((!(state & (ERTS_PSFLG_SIG_Q
+                                     | ERTS_PSFLG_NMSG_SIG_IN_Q)))
+                         | (!!(state & ERTS_PSFLG_ACTIVE_SYS)))) {
+            /*
+             * Either already handled or someone else set the active-sys
+             * flag...
+             */
+            nmsig = 0;
+        }
+        if ((!!msig) & (!!(state & ERTS_PSFLG_ACTIVE))) {
+            /*
+             * Someone else set the active flag (we cannot determine if it
+             * has been handled or not by looking at the state flag)...
+             */
+            msig = 0;
+        }
+        if (msig|nmsig) {
+            if (!nmsig) {
+                erts_proc_notify_new_message(proc, 0);
+            }
+            else {
+                erts_aint32_t extra = msig ? ERTS_PSFLG_ACTIVE : 0;
+                erts_proc_notify_new_sig(proc, state, extra);
+            }
+        }
+    }
+    erts_free(ERTS_ALC_T_SCHD_SIG_NTFY, vssnp);
 }
 
 Sint
-erts_proc_sig_fetch_msgq_len_offs__(Process *proc)
+erts_proc_sig_fetch_msgq_len_offs__(Process *proc,
+                                    ErtsSignalInQueueBufferArray *buffers,
+                                    int need_unget_buffers)
 {
-    ErtsProcSigMsgQLenOffsetMarker *marker
-        = (ErtsProcSigMsgQLenOffsetMarker *) proc->sig_inq.first;
+    ErtsProcSigMsgQLenOffsetMarker *marker;
+    Sint len;
 
+    marker = (ErtsProcSigMsgQLenOffsetMarker *) proc->sig_inq.first;
+    ASSERT(marker);
     ASSERT(marker->common.tag == ERTS_PROC_SIG_MSGQ_LEN_OFFS_MARK);
 
-    if (marker->common.next) {
-        Sint len;
+    proc->sig_qs.flags |= FS_DELAYED_PSIGQS_LEN;
 
-        proc->sig_qs.flags |= FS_DELAYED_PSIGQS_LEN;
+    /*
+     * Prevent update of sig_qs.len in fetch. These
+     * updates are done via process-info signal(s)
+     * instead...
+     */
+    len = proc->sig_inq.len;
+    marker->delayed_len += len;
+    marker->len_offset -= len;
+    proc->sig_inq.len = 0;
 
-        /*
-         * Prevent update of sig_qs.len in fetch. These
-         * updates are done via process-info signal(s)
-         * instead...
-         */
-        len = proc->sig_inq.len;
-        marker->delayed_len += len;
-        marker->len_offset -= len;
-        proc->sig_inq.len = 0;
+    /*
+     * Temporarily remove marker during fetch...
+     */
 
-        /*
-         * Temporarily remove marker during fetch...
-         */
+    proc->sig_inq.first = marker->common.next;
+    if (proc->sig_inq.last == &marker->common.next)
+        proc->sig_inq.last = &proc->sig_inq.first;
+    if (proc->sig_inq.nmsigs.next == &marker->common.next)
+        proc->sig_inq.nmsigs.next = &proc->sig_inq.first;
+    if (proc->sig_inq.nmsigs.last == &marker->common.next)
+        proc->sig_inq.nmsigs.last = &proc->sig_inq.first;
 
-        proc->sig_inq.first = marker->common.next;
-        if (proc->sig_inq.last == &marker->common.next)
-            proc->sig_inq.last = &proc->sig_inq.first;
-        if (proc->sig_inq.nmsigs.next == &marker->common.next)
-            proc->sig_inq.nmsigs.next = &proc->sig_inq.first;
-        if (proc->sig_inq.nmsigs.last == &marker->common.next)
-            proc->sig_inq.nmsigs.last = &proc->sig_inq.first;
+    erts_proc_sig_fetch__(proc, buffers, need_unget_buffers);
 
-        erts_proc_sig_fetch__(proc);
-
-        marker->common.next = NULL;
-        proc->sig_inq.first = (ErtsMessage *) marker;
-        proc->sig_inq.last = &marker->common.next;
-
-    }
+    marker->common.next = NULL;
+    proc->sig_inq.first = (ErtsMessage *) marker;
+    proc->sig_inq.last = &marker->common.next;
 
     return marker->delayed_len;
 }
@@ -1837,8 +2075,14 @@ erts_proc_sig_send_dist_to_alias(Eterm from, Eterm alias,
 
     ASSERT(is_ref(alias));
     pid = erts_get_pid_of_ref(alias);
-    if (!is_internal_pid(pid))
+    if (!is_internal_pid(pid)) {
+        if (hfrag) {
+            /* Fragmented message... */
+            erts_free_dist_ext_copy(erts_get_dist_ext(hfrag));
+            free_message_buffer(hfrag);
+        }
         return;
+    }
 
     /*
      * The receiver can distinguish between these two scenarios by
@@ -2538,15 +2782,88 @@ int
 erts_proc_sig_send_process_info_request(Process *c_p,
                                         Eterm to,
                                         int *item_ix,
+                                        Eterm *item_extra,
                                         int len,
                                         int need_msgq_len,
                                         int flags,
                                         Uint reserve_size,
                                         Eterm ref)
 {
-    Uint size = sizeof(ErtsProcessInfoSig) + (len - 1) * sizeof(int);
-    ErtsProcessInfoSig *pis = erts_alloc(ERTS_ALC_T_SIG_DATA, size);
+    Uint size, item_ix_offs, extra_offs, extra_hfrag_offs,
+        extra_hsz = 0, *extra_hszs = NULL;
+    ErtsProcessInfoSig *pis;
     int res;
+
+    if (item_extra) {
+        int i;
+        extra_hszs = erts_alloc(ERTS_ALC_T_TMP, sizeof(Uint)*len);
+        for (i = 0; i < len; i++) {
+            Eterm extra = item_extra[i];
+            extra_hszs[i] = (is_non_value(extra) || is_immed(extra)
+                             ? 0
+                             : size_object(extra));
+            extra_hsz += extra_hszs[i];
+        }
+    }
+
+    size = ERTS_ALC_WORD_ALIGN_SIZE(sizeof(ErtsProcessInfoSig));
+    item_ix_offs = size;
+    size += ERTS_ALC_WORD_ALIGN_SIZE(len * sizeof(int));
+    if (!item_extra) {
+        extra_offs = 0;
+        extra_hfrag_offs = 0;
+    }
+    else {
+        extra_offs = size;
+        size += ERTS_ALC_WORD_ALIGN_SIZE(len * sizeof(Eterm));
+        extra_hfrag_offs = size;
+        if (extra_hsz)
+            size += ERTS_HEAP_FRAG_SIZE(extra_hsz);
+    }
+    pis = erts_alloc(ERTS_ALC_T_SIG_DATA, size);
+    pis->item_ix = (int *) (((char *) pis) + item_ix_offs);
+    if (!item_extra) {
+        ASSERT(!extra_offs);
+        pis->item_extra = NULL;
+        pis->extra_hfrag = NULL;
+    }
+    else {
+        int i;
+        Eterm *extra_hp;
+        ErlOffHeap *extra_off_heap;
+#ifdef DEBUG
+        Eterm *end_hp = NULL;
+#endif
+        ASSERT(extra_offs);
+        pis->item_extra = (Eterm *) (((char *) pis) + extra_offs);
+        if (!extra_hsz) {
+            extra_hp = NULL;
+            extra_off_heap = NULL;
+            pis->extra_hfrag = NULL;
+        }
+        else {
+            pis->extra_hfrag = (ErlHeapFragment *) (((char *) pis)
+                                                    + extra_hfrag_offs);
+            ERTS_INIT_HEAP_FRAG(pis->extra_hfrag, extra_hsz, extra_hsz);
+            extra_hp = &pis->extra_hfrag->mem[0];
+#ifdef DEBUG
+            end_hp = extra_hp + extra_hsz;
+#endif
+            extra_off_heap = &pis->extra_hfrag->off_heap;
+        }
+        for (i = 0; i < len; i++) {
+            if (!extra_hsz || !extra_hszs[i]) {
+                pis->item_extra[i] = item_extra[i];
+            }
+            else {
+                pis->item_extra[i] = copy_struct(item_extra[i], extra_hszs[i],
+                                                 &extra_hp, extra_off_heap);
+            }
+        }
+        ASSERT(extra_hp == end_hp);
+        erts_free(ERTS_ALC_T_TMP, extra_hszs);
+        reserve_size += sizeof(Eterm)*extra_hsz;
+    }
 
     ASSERT(c_p);
     ASSERT(item_ix);
@@ -2584,7 +2901,7 @@ erts_proc_sig_send_process_info_request(Process *c_p,
     if (res) {
         (void) maybe_elevate_sig_handling_prio(c_p, -1, to);
     } else {
-        erts_free(ERTS_ALC_T_SIG_DATA, pis);
+        destroy_process_info_sig(pis);
     }
 
     return res;
@@ -4567,12 +4884,17 @@ destroy_process_info_request(Process *c_p, ErtsProcessInfoSig *pisig)
                 = (ErtsProcessInfoSig *) (((char *) marker)
                                           - offsetof(ErtsProcessInfoSig,
                                                      marker));
-            erts_free(ERTS_ALC_T_SIG_DATA, pisig2);
+            destroy_process_info_sig(pisig2);
         }
     }
 
-    if (dealloc_pisig)
-        erts_free(ERTS_ALC_T_SIG_DATA, pisig);
+    if (dealloc_pisig) {
+        destroy_process_info_sig(pisig);
+    }
+    else if (pisig->extra_hfrag) {
+        erts_cleanup_offheap(&pisig->extra_hfrag->off_heap);
+        pisig->extra_hfrag = NULL;
+    }
 }
 
 static int
@@ -4680,7 +5002,7 @@ handle_process_info(Process *c_p, ErtsSigRecvTracing *tracing,
             erts_factory_selfcontained_message_init(&hfact, mp, &hfrag->mem[0]);
 
             res = erts_process_info(c_p, &hfact, c_p, ERTS_PROC_LOCK_MAIN,
-                                    pisig->item_ix, pisig->len,
+                                    pisig->item_ix, pisig->item_extra, pisig->len,
                                     pisig->flags, reserve_size, &reds);
 
             hp = erts_produce_heap(&hfact,
@@ -5284,8 +5606,6 @@ handle_alias_message(Process *c_p, ErtsMessage *sig, ErtsMessage ***next_nm_sig)
     ASSERT(is_internal_pid(from) || is_atom(from));
     ASSERT(is_internal_pid_ref(alias));
 
-    ERL_MESSAGE_FROM(sig) = from;
-    
     mon = erts_monitor_tree_lookup(ERTS_P_MONITORS(c_p), alias);
     flags = mon ? mon->flags : (Uint16) 0;
     if (!(flags & ERTS_ML_STATE_ALIAS_MASK)
@@ -5295,17 +5615,13 @@ handle_alias_message(Process *c_p, ErtsMessage *sig, ErtsMessage ***next_nm_sig)
          * drop message...
          */
         remove_nm_sig(c_p, sig, next_nm_sig);
-        /* restored as message... */
-        ERL_MESSAGE_TERM(sig) = msg;
-        if (type == ERTS_SIG_Q_TYPE_DIST)
-            sig->data.heap_frag = &sig->hfrag;
-        else
-            sig->data.attached = data_attached;
         sig->next = NULL;;
         erts_cleanup_messages(sig);
         return 2;
     }
 
+    ERL_MESSAGE_FROM(sig) = from;
+    
     if ((flags & ERTS_ML_STATE_ALIAS_MASK) == ERTS_ML_STATE_ALIAS_ONCE) {
         mon->flags &= ~ERTS_ML_STATE_ALIAS_MASK;
 
@@ -5427,7 +5743,7 @@ erts_proc_sig_handle_incoming(Process *c_p, erts_aint32_t *statep,
     ERTS_LC_ASSERT(ERTS_PROC_LOCK_MAIN == erts_proc_lc_my_proc_locks(c_p));
 
     if (!local_only && !(c_p->sig_qs.flags & FS_FLUSHING_SIGS)) {
-        if (ERTS_PSFLG_SIG_IN_Q & state) {
+        if ((ERTS_PSFLG_NMSG_SIG_IN_Q|ERTS_PSFLG_MSG_SIG_IN_Q) & state) {
             erts_proc_sig_queue_lock(c_p);
             erts_proc_sig_fetch(c_p);
             erts_proc_unlock(c_p, ERTS_PROC_LOCK_MSGQ);
@@ -6200,20 +6516,20 @@ stop: {
             res = !0;
         }
 
-	if (!!(state & ERTS_PSFLG_MAYBE_SELF_SIGS)
-	    & !(state & (ERTS_PSFLG_SIG_Q|ERTS_PSFLG_SIG_IN_Q))) {
+	if (!(state & (ERTS_PSFLG_SIG_Q
+                       | ERTS_PSFLG_NMSG_SIG_IN_Q
+                       | ERTS_PSFLG_MSG_SIG_IN_Q))) {
 	    /*
 	     * We know we do not have any outstanding signals
 	     * from ourselves...
 	     */
-	    state = erts_atomic32_read_band_nob(&c_p->state,
-                                                ~ERTS_PSFLG_MAYBE_SELF_SIGS);
-	    state &= ~ERTS_PSFLG_MAYBE_SELF_SIGS;
+	    (void) erts_atomic32_read_band_nob(&c_p->xstate,
+                                               ~ERTS_PXSFLG_MAYBE_SELF_SIGS);
 	}
 
         if (delayed_nm_signals.first) {
             /*
-             * We do this after clearing ERTS_PSFLG_MAYBE_SELF_SIGS
+             * We do this after clearing ERTS_PXSFLG_MAYBE_SELF_SIGS
              * since there currently are no signals that can be delayed
              * that should be counted as originating from the process
              * itself. If such signals appear in the future this has to
@@ -6339,6 +6655,7 @@ int
 erts_proc_sig_handle_exit(Process *c_p, Sint *redsp,
                           ErtsProcExitContext *pe_ctxt_p)
 {
+    int yield = 0;
     int cnt;
     Sint limit;
     ErtsMessage *sig, ***next_nm_sig;
@@ -6483,12 +6800,11 @@ erts_proc_sig_handle_exit(Process *c_p, Sint *redsp,
             handle_sync_suspend(c_p, sig);
             break;
 
-        case ERTS_SIG_Q_OP_RPC: {
-            int yield = 0;
-            handle_rpc(c_p, (ErtsProcSigRPC *) sig,
-                       cnt, limit, &yield);
+        case ERTS_SIG_Q_OP_RPC:
+            yield = 0;
+            cnt += handle_rpc(c_p, (ErtsProcSigRPC *) sig,
+                              cnt, limit, &yield);
             break;
-        }
 
         case ERTS_SIG_Q_OP_DIST_SPAWN_REPLY: {
             cnt += handle_dist_spawn_reply_exiting(c_p, sig, pe_ctxt_p);
@@ -6534,7 +6850,7 @@ erts_proc_sig_handle_exit(Process *c_p, Sint *redsp,
             break;
         }
 
-    } while (cnt >= limit && *next_nm_sig);
+    } while (cnt <= limit && !yield && *next_nm_sig);
 
     *redsp += cnt / ERTS_SIG_REDS_CNT_FACTOR;
 
@@ -7951,21 +8267,22 @@ erts_internal_dirty_process_handle_signals_1(BIF_ALIST_1)
     if (!rp)
         BIF_RET(am_noproc);
 
-    state = erts_atomic32_read_nob(&rp->state);
-    dirty = (state & ERTS_PSFLG_DIRTY_RUNNING);
-    /*
-     * Ignore ERTS_PSFLG_DIRTY_RUNNING_SYS (see
-     * comment in erts_execute_dirty_system_task()
-     * in erl_process.c).
-     */
+    state = erts_atomic32_read_acqb(&rp->state);
+    dirty = ERTS_PROC_IN_DIRTY_STATE(state);
     if (!dirty)
         BIF_RET(am_normal);
+
+    if (!(state & (ERTS_PSFLG_SIG_Q
+                   | ERTS_PSFLG_NMSG_SIG_IN_Q
+                   | ERTS_PSFLG_MSG_SIG_IN_Q))) {
+        BIF_RET(am_ok);
+    }
 
     busy = erts_proc_trylock(rp, ERTS_PROC_LOCK_MAIN) == EBUSY;
 
     state = erts_atomic32_read_mb(&rp->state);
     noproc = (state & ERTS_PSFLG_FREE);
-    dirty = (state & ERTS_PSFLG_DIRTY_RUNNING);
+    dirty = ERTS_PROC_NEED_DIRTY_SIG_HANDLING(state);
 
     if (busy) {
         if (noproc)
@@ -8234,14 +8551,17 @@ erts_proc_sig_debug_foreach_sig(Process *c_p,
                     break;
 
                 case ERTS_SIG_Q_OP_ALIAS_MSG: {
+                    void *attached;
                     ErlHeapFragment *hfp;
-                    if (type == ERTS_SIG_Q_TYPE_OFF_HEAP)
+                    (void) get_alias_msg_data(sig, NULL, NULL, NULL, &attached);
+                    if (!attached)
+                        break;
+                    if (attached == ERTS_MSG_COMBINED_HFRAG)
                         hfp = &sig->hfrag;
-                    else if (type == ERTS_SIG_Q_TYPE_HEAP_FRAG)
-                        hfp = sig->data.heap_frag;
                     else
-                        break; /* on heap */
+                        hfp = (ErlHeapFragment *) attached;
                     debug_foreach_sig_heap_frags(hfp, oh_func, arg);
+                    break;
                 }
 
                 case ERTS_SIG_Q_OP_DEMONITOR:
@@ -8420,7 +8740,8 @@ proc_sig_hdbg_check_queue(Process *proc,
                           ErtsMessage **sig_nm_last,
                           ErtsSigRecvTracing *tracing,
                           int *found_set_save_recv_marker_p,
-                          erts_aint32_t sig_psflg)
+                          erts_aint32_t nmsig_psflg,
+                          erts_aint32_t msig_psflg)
 {
     ErtsMessage **next, *sig, **nm_next, **nm_last;
     int last_nm_sig_found, nm_sigs = 0, found_next_trace = 0,
@@ -8452,7 +8773,7 @@ proc_sig_hdbg_check_queue(Process *proc,
         ErtsSignal *nm_sig;
 
         if (next == sig_last) {
-            ASSERT(!*next);
+            ERTS_ASSERT(!*next);
             last_sig_found = 1;
         }
 
@@ -8471,7 +8792,7 @@ proc_sig_hdbg_check_queue(Process *proc,
             if (ERTS_SIG_IS_RECV_MARKER(sig)) {
                 ErtsRecvMarker *markp = (ErtsRecvMarker *) sig;
                 recv_marker++;
-                ASSERT(!markp->set_save);
+                ERTS_ASSERT(!markp->set_save);
                 ERTS_ASSERT(next == markp->prev_next);
             }
             else {
@@ -8488,7 +8809,7 @@ proc_sig_hdbg_check_queue(Process *proc,
             sig = sig->next;
 
             if (next == sig_last) {
-                ASSERT(!*next);
+                ERTS_ASSERT(!*next);
                 last_sig_found = 1;
             }
 
@@ -8533,7 +8854,7 @@ proc_sig_hdbg_check_queue(Process *proc,
             ERTS_ASSERT(nm_next == next);
 
             if (nm_last == next) {
-                ASSERT(!nm_sig->common.specific.next);
+                ERTS_ASSERT(!nm_sig->common.specific.next);
                 last_nm_sig_found = 1;
             }
 
@@ -8569,12 +8890,19 @@ proc_sig_hdbg_check_queue(Process *proc,
     ERTS_ASSERT(last_nm_sig_found);
     ERTS_ASSERT(last_sig_found);
 
-    if (sig_psflg != ERTS_PSFLG_FREE) {
+    if (nmsig_psflg|msig_psflg) {
         erts_aint32_t state = erts_atomic32_read_nob(&proc->state);
-        ERTS_ASSERT(nm_sigs
-                    ? !!(state & sig_psflg)
-                    : (!(state & sig_psflg)
-                       || !!erts_atomic_read_nob(&proc->sig_inq_buffers)));
+        int using_buffers = !!erts_atomic_read_nob(&proc->sig_inq_buffers);
+        if (nmsig_psflg) {
+            ERTS_ASSERT(nm_sigs
+                        ? !!(state & nmsig_psflg)
+                        : (!(state & nmsig_psflg) || using_buffers));
+        }
+        if (msig_psflg) {
+            ERTS_ASSERT(msg_len
+                        ? !!(state & msig_psflg)
+                        : (!(state & msig_psflg) || using_buffers));
+        }
     }
 
     return msg_len;
@@ -8599,7 +8927,8 @@ erts_proc_sig_hdbg_check_priv_queue(Process *p, int qlock, char *what, char *fil
                                      NULL,
                                      NULL,
                                      &found_set_save_recv_marker,
-                                     ERTS_PSFLG_FREE);
+                                     0,
+                                     0);
     len2 = proc_sig_hdbg_check_queue(p,
                                      1,
                                      &p->sig_qs.cont,
@@ -8608,7 +8937,8 @@ erts_proc_sig_hdbg_check_priv_queue(Process *p, int qlock, char *what, char *fil
                                      p->sig_qs.nmsigs.last,
                                      NULL,
                                      &found_set_save_recv_marker,
-                                     ERTS_PSFLG_SIG_Q);
+                                     ERTS_PSFLG_SIG_Q,
+                                     0);
     ERTS_ASSERT(found_set_save_recv_marker == 1
                 || found_set_save_recv_marker == 0);
     ERTS_ASSERT(found_set_save_recv_marker || !blkp || blkp->pending_set_save_ix < 0);
@@ -8618,13 +8948,25 @@ erts_proc_sig_hdbg_check_priv_queue(Process *p, int qlock, char *what, char *fil
 }
 
 void
-erts_proc_sig_hdbg_check_in_queue(Process *p, char *what, char *file, int line)
+erts_proc_sig_hdbg_check_in_queue(Process *p, struct ErtsSignalInQueue_ *buffer,
+                                  char *what, char *file, int line)
 {
     Sint len;
-    ERTS_LC_ASSERT(erts_thr_progress_is_blocking()
+    int nmsig_flag, msig_flag;
+    ERTS_LC_ASSERT(&p->sig_inq != buffer
+                   || erts_thr_progress_is_blocking()
                    || ERTS_PROC_IS_EXITING(p)
                    || (ERTS_PROC_LOCK_MSGQ
                        & erts_proc_lc_my_proc_locks(p)));
+    if (buffer != &p->sig_inq) {
+        nmsig_flag = 0;
+        msig_flag = 0;
+    }
+    else {
+        nmsig_flag = ERTS_PSFLG_NMSG_SIG_IN_Q;
+        msig_flag = ERTS_PSFLG_MSG_SIG_IN_Q;
+    }
+
     len = proc_sig_hdbg_check_queue(p,
                                     0,
                                     &p->sig_inq.first,
@@ -8633,8 +8975,9 @@ erts_proc_sig_hdbg_check_in_queue(Process *p, char *what, char *file, int line)
                                     p->sig_inq.nmsigs.last,
                                     NULL,
                                     NULL,
-                                    ERTS_PSFLG_SIG_IN_Q);
-    ASSERT(p->sig_inq.len == len); (void)len;
+                                    nmsig_flag,
+                                    msig_flag);
+    ERTS_ASSERT(p->sig_inq.len == len); (void)len;
 }
 
 #endif /* ERTS_PROC_SIG_HARD_DEBUG */
@@ -8666,8 +9009,7 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
                                           ErtsMessage* first,
                                           ErtsMessage** last,
                                           ErtsMessage** last_next,
-                                          Uint len,
-                                          int is_nonmsg_signal_enqueue)
+                                          Uint len)
 {
     int need_unget_buffers;
     ErtsSignalInQueueBufferArray* buffers;
@@ -8676,7 +9018,7 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
         /* We never need to unget the buffers array if we do not get it */
         return 0;
     } else {
-        int is_nonmsg_signal_or_multi_sig;
+        int nonmsg = ERTS_SIG_IS_NON_MSG(first);
         ErtsSignalInQueueBuffer* buffer;
         Uint64 nonempty_slots_before;
         Uint32 slot, state;
@@ -8689,12 +9031,6 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
         slot = make_internal_hash(from, 0) %
                 ERTS_PROC_SIG_INQ_BUFFERED_NR_OF_BUFFERS;
         buffer = &buffers->slots[slot];
-        nonempty_slots_before = 1;
-
-        /* Multiple signals or is_nonmsg_signal_enqueue means that we
-         * report that there is a non-msg signal in the queue. */
-        is_nonmsg_signal_or_multi_sig = is_nonmsg_signal_enqueue ||
-                                        !(last == &first->next);
 
         proc_sig_queue_lock_buffer(buffer);
 
@@ -8707,59 +9043,81 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
             erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
             return 0;
         }
+
         /*
          *  The buffer is alive and locked. This means that it is safe
          *  to insert signals to it
          */
 
-        if (&buffer->b.queue.first == buffer->b.queue.last) {
-            /* The buffer is empty so we need to notify the receiver
-             * unless some other slot is nonempty (in that case
-             * another enqueuer has already (or will) notified the
-             * receiver).
-             */
-            nonempty_slots_before =
-                (Uint64)erts_atomic64_read_bor_nob(&buffers->nonempty_slots,
-                                                   (erts_aint64_t)(((Uint64)1) << slot));
-        }
-
-        if (is_nonmsg_signal_or_multi_sig && !buffer->b.queue.nmsigs.next) {
+        while (!0) {
             /*
-             * Inserting nonmsg signal and no nonmsg signals in buffer
-             * before. This means that we have to update the nonmsg
-             * status of this buffer in the buffers structure.
-             *
-             * Acquire barrier is used since we do not want this
-             * operation to be reordered with setting the
-             * ERTS_PSFLG_SIG_IN_Q flag inside the enqueue_signals
-             * call below.
+             * This loop body is only executed more than once if another
+             * thread is currently flushing buffers at the same time as
+             * this operation is performed. The restart of the loop
+             * prevents info in 'msgs_in_slots' and 'nonmsgs_in_slots'
+             * from being lost. The loop can at most be restarted twice
+             * since we have the lock on the buffer. Restarting twice is,
+             * however, extremely unlikely to happen...
              */
-            erts_atomic64_read_bor_mb(&buffers->nonmsg_slots,
-                                      (erts_aint64_t)(((Uint64)1) << slot));
+
+            if (len && !erts_atomic32_read_nob(&buffers->msgs_in_slots)) {
+                erts_atomic32_set_nob(&buffers->msgs_in_slots, !0);
+            }
+
+            if (nonmsg && !erts_atomic32_read_nob(&buffers->nonmsgs_in_slots)) {
+                erts_atomic32_set_nob(&buffers->nonmsgs_in_slots, !0);
+            }
+
+            if (&buffer->b.queue.first == buffer->b.queue.last) {
+                /* The buffer is empty so we need to notify the receiver
+                 * unless some other slot is nonempty (in that case
+                 * another enqueuer has already (or will) notified the
+                 * receiver).
+                 */
+                nonempty_slots_before =
+                    (Uint64)erts_atomic64_read_bor_mb(&buffers->nonempty_slots,
+                                                      (erts_aint64_t)(((Uint64)1) << slot));
+            }
+            else {
+                nonempty_slots_before =
+                    (Uint64)erts_atomic64_read_mb(&buffers->nonempty_slots);
+                if (!(nonempty_slots_before & (((Uint64)1) << slot))) {
+                    /*
+                     * Someone is flushing buffers and has not yet handled
+                     * this buffers. That is, it is no point in continuing
+                     * with verification of 'msgs_in_slots' and
+                     * 'nonmsgs_in_slots'. We only need this information
+                     * while signals are in the buffer and we have not yet
+                     * decided to fetch it. We know that it soon *will* be
+                     * emptied by the flush operation.
+                     */
+                    break;
+                }
+            }
+
+            if (len) {
+                if (!erts_atomic32_read_nob(&buffers->msgs_in_slots))
+                    continue; /* restart loop */
+            }
+
+            if (nonmsg) {
+                if (!erts_atomic32_read_nob(&buffers->nonmsgs_in_slots))
+                    continue; /* restart loop */
+            }
+
+            break;
         }
 
         state = erts_atomic32_read_nob(&receiver->state);
 
-        if (last == &first->next && !is_nonmsg_signal_or_multi_sig) {
-            /*
-             * Optimization for the common case of a single message
-             * signal.
-             */
-            ASSERT(len == 1);
-            ASSERT(ERTS_SIG_IS_MSG(first));
-            *buffer->b.queue.last = first;
-            buffer->b.queue.last = &first->next;
-            buffer->b.queue.len++;
-        } else {
-            state =
-                enqueue_signals(receiver,
+        state = enqueue_signals(!0,
+                                receiver,
                                 first,
                                 last,
                                 last_next,
                                 len,
                                 state,
                                 &buffer->b.queue);
-        }
         buffer->b.nr_of_enqueues += 1;
 
         proc_sig_queue_unlock_buffer(buffer);
@@ -8770,7 +9128,7 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
          * we have new signals.
          */
 
-        if (!nonempty_slots_before) {
+        if (len && !nonempty_slots_before) {
 
             /*
              * There is one situation in which we need to synchronize
@@ -8794,13 +9152,12 @@ erts_proc_sig_queue_try_enqueue_to_buffer(Eterm from,
             erts_proc_lock_wait_until_released(receiver, ERTS_PROC_LOCK_MSGQ);
         }
 
-        if (is_nonmsg_signal_or_multi_sig) {
-            if (is_nonmsg_signal_enqueue) {
-                erts_proc_notify_new_sig(receiver, state, 0);
-            } else {
-                erts_proc_notify_new_sig(receiver, state, ERTS_PSFLG_ACTIVE);
-            }
-        } else {
+        if (nonmsg) {
+            erts_proc_notify_new_sig(receiver, state,
+                                     len ? ERTS_PSFLG_ACTIVE : 0);
+        }
+        else {
+            ASSERT(len);
             erts_proc_notify_new_message(receiver, receiver_locks);
         }
         erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
@@ -8873,51 +9230,47 @@ static Uint proc_sig_queue_flush_buffer(Process* proc,
     Uint nr_of_enqueues;
     ErtsSignalInQueueBuffer* buf = &buffers->slots[buffer_index];
     proc_sig_queue_lock_buffer(buf);
-    /* This function should only be called when there is at least one
-       item in the buffer */
-    ASSERT(buf->b.queue.first != NULL);
-    nr_of_enqueues = buf->b.nr_of_enqueues;
-    buf->b.nr_of_enqueues = 0;
-    ASSERT(nr_of_enqueues > 0);
-    if (buf->b.alive) {
-        sig_inq_concat(&proc->sig_inq, &buf->b.queue);
-        buf->b.queue.first = NULL;
-        buf->b.queue.last = &buf->b.queue.first;
-        buf->b.queue.len = 0;
-        buf->b.queue.nmsigs.next = NULL;
-        buf->b.queue.nmsigs.last = NULL;
+    if (!buf->b.queue.first) {
+#ifdef ERTS_PROC_SIG_HARD_DEBUG
+        if (buf->b.alive) {
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &buf->b.queue);
+        }
+#endif
+        nr_of_enqueues = buf->b.nr_of_enqueues;
+        ASSERT(nr_of_enqueues == 0);
     }
-    /*
-     * The appropriate bit in &buffers->nonempty_slots needs to be
-     * cleared because a thread might have inserted something after
-     * all bits got cleared in erts_proc_sig_queue_flush_all_buffers.
-     */
-    erts_atomic64_read_band_nob(&buffers->nonempty_slots,
-                                (erts_aint64_t)(~(((Uint64)1) << buffer_index)));
-    /*
-     * The nonmsg_slots flag for this slot also needs to be cleared so
-     * that the erts_proc_sig_fetch function can detect if it has
-     * reset the ERTS_PSFLG_SIG_IN_Q when it should not do that.
-     */
-    erts_atomic64_read_band_nob(&buffers->nonmsg_slots,
-                                (erts_aint64_t)(~(((Uint64)1) << buffer_index)));
+    else {
+        nr_of_enqueues = buf->b.nr_of_enqueues;
+        buf->b.nr_of_enqueues = 0;
+        ASSERT(nr_of_enqueues > 0);
+        if (buf->b.alive) {
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &proc->sig_inq);
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &buf->b.queue);
+            sig_inq_concat(&proc->sig_inq, &buf->b.queue);
+            buf->b.queue.first = NULL;
+            buf->b.queue.last = &buf->b.queue.first;
+            buf->b.queue.len = 0;
+            buf->b.queue.nmsigs.next = NULL;
+            buf->b.queue.nmsigs.last = NULL;
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &buf->b.queue);
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &proc->sig_inq);
+        }
+    }
     proc_sig_queue_unlock_buffer(buf);
     return nr_of_enqueues;
 }
 
 
-ErtsSignalInQueueBufferArray*
-erts_proc_sig_queue_flush_get_buffers(Process* proc, int *need_unget_buffers)
+static void proc_sig_queue_flush_buffers(Process *proc, ErtsSignalInQueueBufferArray *buffers)
 {
     Uint i;
-    ErtsSignalInQueueBufferArray* buffers;
     Uint64 nonempty_slots;
-    buffers = erts_proc_sig_queue_get_buffers(proc, need_unget_buffers);
-    if (NULL == buffers) {
-        return NULL;
-    }
-    nonempty_slots = (Uint64)erts_atomic64_xchg_nob(&buffers->nonempty_slots,
-                                                    (erts_aint64_t)((Uint64)0));
+
+    ASSERT(buffers);
+    erts_atomic32_set_nob(&buffers->msgs_in_slots, 0);
+    erts_atomic32_set_nob(&buffers->nonmsgs_in_slots, 0);
+    nonempty_slots = (Uint64)erts_atomic64_xchg_mb(&buffers->nonempty_slots,
+                                                   (erts_aint64_t)((Uint64)0));
     if (nonempty_slots != 0) {
         for(i = 0; i < ERTS_PROC_SIG_INQ_BUFFERED_NR_OF_BUFFERS; i++) {
             Uint64 slot_mask = (((Uint64)1) << i);
@@ -8938,7 +9291,6 @@ erts_proc_sig_queue_flush_get_buffers(Process* proc, int *need_unget_buffers)
             buffers->nr_of_enqueues = 0;
         }
     }
-    return buffers;
 }
 
 
@@ -8946,14 +9298,16 @@ void
 erts_proc_sig_queue_flush_buffers(Process* proc)
 {
     ErtsSignalInQueueBufferArray* buffers;
-    int need_undread_buffers;
+    int need_unget_buffers;
 
     ERTS_LC_ASSERT(ERTS_PROC_IS_EXITING(proc) ||
                    (erts_proc_lc_my_proc_locks(proc) & ERTS_PROC_LOCK_MSGQ));
 
-    buffers =
-        erts_proc_sig_queue_flush_get_buffers(proc, &need_undread_buffers);
-    erts_proc_sig_queue_unget_buffers(buffers, need_undread_buffers);
+    buffers = erts_proc_sig_queue_get_buffers(proc, &need_unget_buffers);
+    if (buffers) {
+        proc_sig_queue_flush_buffers(proc, buffers);
+        erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
+    }
 }
 
 static void sigq_buffer_array_refc_dec(void *buffers_p)
@@ -8995,11 +9349,14 @@ void erts_proc_sig_queue_flush_and_deinstall_buffers(Process* proc)
     buffers->alive = 0;
     proc->sig_inq_contention_counter = 0;
 
+    ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &proc->sig_inq);
     for (i = 0; i < ERTS_PROC_SIG_INQ_BUFFERED_NR_OF_BUFFERS; i++) {
         proc_sig_queue_lock_buffer(&buffers->slots[i]);
 
         if (buffers->slots[i].b.queue.first != NULL) {
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &buffers->slots[i].b.queue);
             sig_inq_concat(&proc->sig_inq, &buffers->slots[i].b.queue);
+            ERTS_HDBG_CHECK_SIGNAL_IN_QUEUE(proc, &proc->sig_inq);
         }
 
         buffers->slots[i].b.alive = 0;
@@ -9009,8 +9366,9 @@ void erts_proc_sig_queue_flush_and_deinstall_buffers(Process* proc)
 
     /* Nothing can be enqueued to the buffer array beyond this point. */
 
+    erts_atomic32_set_nob(&buffers->nonmsgs_in_slots, 0);
+    erts_atomic32_set_nob(&buffers->msgs_in_slots, 0);
     erts_atomic64_set_nob(&buffers->nonempty_slots, (erts_aint64_t)0);
-    erts_atomic64_set_nob(&buffers->nonmsg_slots, (erts_aint64_t)0);
     erts_atomic_set_mb(&proc->sig_inq_buffers, (erts_aint_t)NULL);
 
     erts_proc_sig_queue_unget_buffers(buffers, need_unget_buffers);
@@ -9043,7 +9401,8 @@ void erts_proc_sig_queue_maybe_install_buffers(Process* p, erts_aint32_t state)
     buffers = erts_alloc(ERTS_ALC_T_SIGQ_BUFFERS,
                          sizeof(ErtsSignalInQueueBufferArray));
     erts_atomic64_init_nob(&buffers->nonempty_slots, (erts_aint64_t)(Uint64)0);
-    erts_atomic64_init_nob(&buffers->nonmsg_slots, (erts_aint64_t)(Uint64)0);
+    erts_atomic32_init_nob(&buffers->nonmsgs_in_slots, 0);
+    erts_atomic32_init_nob(&buffers->msgs_in_slots, 0);
     erts_refc_init(&buffers->dirty_refc, 1);
     buffers->nr_of_enqueues = 0;
     buffers->nr_of_rounds_left =
@@ -9064,48 +9423,6 @@ void erts_proc_sig_queue_maybe_install_buffers(Process* p, erts_aint32_t state)
         buffers->slots[i].b.nr_of_enqueues = 0;
     }
     erts_atomic_set_relb(&p->sig_inq_buffers, (erts_aint_t)buffers);
-}
-
-ErtsSignalInQueueBufferArray*
-erts_proc_sig_queue_get_buffers(Process* p, int *need_unread)
-{
-    ErtsThrPrgrDelayHandle dhndl =
-        erts_thr_progress_unmanaged_delay();
-    ErtsSignalInQueueBufferArray* buffers =
-        (ErtsSignalInQueueBufferArray*)erts_atomic_read_acqb(&p->sig_inq_buffers);
-    *need_unread = 0;
-    if (ERTS_THR_PRGR_DHANDLE_MANAGED == dhndl) {
-        erts_thr_progress_unmanaged_continue(dhndl);
-        return buffers;
-    }
-    if (buffers == NULL) {
-        erts_thr_progress_unmanaged_continue(dhndl);
-        return NULL;
-    }
-    erts_refc_inc(&buffers->dirty_refc, 2);
-    erts_thr_progress_unmanaged_continue(dhndl);
-    *need_unread = 1;
-    return buffers;
-}
-
-void erts_proc_sig_queue_unget_buffers(ErtsSignalInQueueBufferArray* buffers,
-                                       int need_unget)
-{
-    if (!need_unget) {
-        return;
-    } else {
-        int i;
-        erts_aint_t refc = erts_refc_dectest(&buffers->dirty_refc, 0);
-        if (refc != 0) {
-            return;
-        }
-        ASSERT(!buffers->alive);
-        for (i = 0; i < ERTS_PROC_SIG_INQ_BUFFERED_NR_OF_BUFFERS; i++) {
-            ASSERT(!buffers->slots[i].b.alive);
-            erts_mtx_destroy(&buffers->slots[i].b.lock);
-        }
-        erts_free(ERTS_ALC_T_SIGQ_BUFFERS, buffers);
-    }
 }
 
 /* Only for test purposes */

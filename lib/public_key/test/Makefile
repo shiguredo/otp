@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2008-2022. All Rights Reserved.
+# Copyright Ericsson AB 2008-2023. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,7 +33,8 @@ MODULES= \
 	public_key_SUITE \
 	pbe_SUITE \
 	pkits_SUITE \
-	pubkey_cert_SUITE
+	pubkey_cert_SUITE \
+	pubkey_policy_tree_SUITE
 
 ERL_FILES= $(MODULES:%=%.erl)
 

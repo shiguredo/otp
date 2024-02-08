@@ -27,6 +27,149 @@
   </header>
   <p>This document describes the changes made to the SSL application.</p>
 
+<section><title>SSL 11.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    ssl application will validate id-kp-serverAuth and
+	    id-kp-clientAuth extended key usage only in end entity
+	    certificates. public_key application will disallow
+	    "anyExtendedKeyUsage" for CA certificates that includes
+	    the extended key usage extension and marks it critical.</p>
+          <p>
+	    Own Id: OTP-18739</p>
+        </item>
+        <item>
+          <p>
+	    Replaced unintentional Erlang Public License 1.1 headers
+	    in some files with the intended Apache License 2.0
+	    header.</p>
+          <p>
+	    Own Id: OTP-18815 Aux Id: PR-7780 </p>
+        </item>
+        <item>
+          <p>
+	    Correct handling of TLS-1.3 legacy scheme names, could
+	    cause interop failures for TLS-1.2 clients.</p>
+          <p>
+	    Own Id: OTP-18817</p>
+        </item>
+        <item>
+          <p>
+	    Add missing export for connection_info() API type.</p>
+          <p>
+	    Own Id: OTP-18886</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Fixed <c>server name indication</c> which was not handled
+	    properly.</p>
+          <p>
+	    Own Id: OTP-18836 Aux Id: GH-7795 </p>
+        </item>
+        <item>
+          <p>
+	    Align documentation and implementation</p>
+          <p>
+	    Own Id: OTP-18853 Aux Id: PR-7841 </p>
+        </item>
+        <item>
+          <p>
+	    Improve connection setup by optimizing certificate
+	    lookup.</p>
+          <p>
+	    Own Id: OTP-18893 Aux Id: PR-7920 PR-7921 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 11.0.3</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Avoid function clause error in ssl:getopts/2 by handling
+	    that inet:getopts may return an empty list during some
+	    circumstances, such as the socket being in a closing
+	    state.</p>
+          <p>
+	    Own Id: OTP-18697 Aux Id: GH-7506 </p>
+        </item>
+        <item>
+          <p>
+	    The API function `ssl:recv/3` has been tightened to
+	    disallow negative length, which has never been documented
+	    to work, but was passed through and caused strange
+	    errors.</p>
+          <p>
+	    Own Id: OTP-18700 Aux Id: GH-7507 </p>
+        </item>
+        <item>
+          <p>
+	    When a client initiated renegotiation was rejected and
+	    the client socket was in active mode the expected error
+	    message to the controlling process was not sent.</p>
+          <p>
+	    Own Id: OTP-18712 Aux Id: GH-7431 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Add some guidance for signature algorithms configuration
+	    in ssl applications users guide.</p>
+          <p>
+	    Own Id: OTP-18631</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 11.0.2</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Added keylog information to all protocol versions in
+	    <c>ssl:connection_information/2</c>.</p>
+          <p>
+	    Own Id: OTP-18643 Aux Id: ERIERL-932 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Add RFC-6083 considerations for DTLS to enable gen_sctp
+	    based callback for the transport.</p>
+          <p>
+	    Own Id: OTP-18618 Aux Id: ERIERL-932 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
 <section><title>SSL 11.0.1</title>
 
     <section><title>Fixed Bugs and Malfunctions</title>
@@ -262,6 +405,61 @@
 	    Also make sha224 a non default value.</p>
           <p>
 	    Own Id: OTP-18572</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 10.9.1.2</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    The API function `ssl:recv/3` has been tightened to
+	    disallow negative length, which has never been documented
+	    to work, but was passed through and caused strange
+	    errors.</p>
+          <p>
+	    Own Id: OTP-18700 Aux Id: GH-7507 </p>
+        </item>
+        <item>
+          <p>
+	    When a client initiated renegotiation was rejected and
+	    the client socket was in active mode the expected error
+	    message to the controlling process was not sent.</p>
+          <p>
+	    Own Id: OTP-18712 Aux Id: GH-7431 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 10.9.1.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Added keylog information to all protocol versions in
+	    <c>ssl:connection_information/2</c>.</p>
+          <p>
+	    Own Id: OTP-18643 Aux Id: ERIERL-932 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Add RFC-6083 considerations for DTLS to enable gen_sctp
+	    based callback for the transport.</p>
+          <p>
+	    Own Id: OTP-18618 Aux Id: ERIERL-932 </p>
         </item>
       </list>
     </section>
@@ -703,6 +901,52 @@
 	    termination.</p>
           <p>
 	    Own Id: OTP-18085</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 10.7.3.9</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    When a client initiated renegotiation was rejected and
+	    the client socket was in active mode the expected error
+	    message to the controlling process was not sent.</p>
+          <p>
+	    Own Id: OTP-18712 Aux Id: GH-7431 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 10.7.3.8</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Added keylog information to all protocol versions in
+	    <c>ssl:connection_information/2</c>.</p>
+          <p>
+	    Own Id: OTP-18643 Aux Id: ERIERL-932 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Add RFC-6083 considerations for DTLS to enable gen_sctp
+	    based callback for the transport.</p>
+          <p>
+	    Own Id: OTP-18618 Aux Id: ERIERL-932 </p>
         </item>
       </list>
     </section>

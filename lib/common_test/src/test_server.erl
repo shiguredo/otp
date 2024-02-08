@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2022. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -466,7 +466,7 @@ run_test_case_msgloop(#st{ref=Ref,pid=Pid,end_conf_pid=EndConfPid0}=St0) ->
 	    From ! {self(),Tag,ok},
 	    run_test_case_msgloop(St);
 	{abort_current_testcase,_,_}=Abort when St0#st.status =:= starting ->
-	    %% we're in init phase, must must postpone this operation
+	    %% we're in init phase, must postpone this operation
 	    %% until test case execution is in progress (or FW:init_tc
 	    %% gets killed)
 	    self() ! Abort,
@@ -561,8 +561,16 @@ run_test_case_msgloop(#st{ref=Ref,pid=Pid,end_conf_pid=EndConfPid0}=St0) ->
 			handle_tc_exit(Reason, St0)
 		end,
 	    run_test_case_msgloop(St);
-	{EndConfPid0,{call_end_conf,Data,_Result}} ->
-	    #st{mf={Mod,Func},config=CurrConf} = St0,
+	{EndConfPid0,{call_end_conf,Data,EndConf,_Result}} ->
+            #st{mf={Mod,Func},config=CurrConfFromState} = St0,
+            CurrConf = case EndConf of
+                           [] ->
+                               %% use latest stored Config
+                               CurrConfFromState;
+                           _ ->
+                               %% use latest Config prepared in pre_end_per_testcase
+                               EndConf
+                       end,
 	    case CurrConf of
 		_ when is_list(CurrConf) ->
 		    {_Mod,_Func,TCPid,TCExitReason,Loc} = Data,
@@ -742,7 +750,7 @@ call_end_conf(Mod,Func,TCPid,TCExitReason,Loc,Conf,TVal) ->
     case erlang:function_exported(Mod,end_per_testcase,2) of
 	false ->
 	    spawn_link(fun() ->
-			       Starter ! {self(),{call_end_conf,Data,ok}}
+			       Starter ! {self(),{call_end_conf,Data,[],ok}}
 		       end);
 	true ->
 	    do_call_end_conf(Starter,Mod,Func,Data,TCExitReason,Conf,TVal)
@@ -776,15 +784,18 @@ do_call_end_conf(Starter,Mod,Func,Data,TCExitReason,Conf,TVal) ->
 				    print_end_conf_result(Mod,Func,Conf,
 							  "crashed",Error)
 			    end,
-			    Supervisor ! {self(),end_conf}
+			    Supervisor ! {self(),end_conf, EndConf}
 		    end,
 		Pid = spawn_link(EndConfApply),
 		receive
-		    {Pid,end_conf} ->
-			Starter ! {self(),{call_end_conf,Data,ok}};
+		    {Pid,end_conf, EndConf} ->
+                        %% Return EndConf to parent process to
+                        %% post_end_per_testcase callback can receive latest
+                        %% Config returned from pre_end_per_testcase
+			Starter ! {self(),{call_end_conf,Data,EndConf,ok}};
 		    {'EXIT',Pid,Reason} ->
 			print_end_conf_result(Mod,Func,Conf,"failed",Reason),
-			Starter ! {self(),{call_end_conf,Data,{error,Reason}}};
+			Starter ! {self(),{call_end_conf,Data,[],{error,Reason}}};
 		    {'EXIT',_OtherPid,Reason} ->
 			%% Probably the parent - not much to do about that
 			exit(Reason)

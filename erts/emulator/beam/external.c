@@ -179,6 +179,8 @@ void erts_late_init_external(void)
     /* pid... */
     memcpy(&lnid[lnid_ix], &pidstr[0], pidstr_len);
 
+    lnid_ix += pidstr_len;
+
     /*
      * Use least significant 32 bits of monotonic time as initial
      * value to hash...
@@ -3534,6 +3536,20 @@ enc_term_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
             goto ref_common;
 
         case REF_DEF:
+            if ((dflags & DFLAG_ETS_COMPRESSED) && is_internal_magic_ref(obj)) {
+                ErtsMRefThing tmp;
+                ErtsMRefThing *mrtp = (ErtsMRefThing *) internal_ref_val(obj);
+
+                erts_refc_inc(&mrtp->mb->intern.refc, 2);
+
+                *ep++ = MAGIC_REF_INTERNAL_REF;
+                sys_memcpy(&tmp, mrtp, sizeof(ErtsMRefThing));
+                tmp.next = *off_heap;
+                sys_memcpy(ep, &tmp, sizeof(ErtsMRefThing));
+                *off_heap = (struct erl_off_heap_header*) ep;
+                ep += sizeof(ErtsMRefThing);
+                break;
+            }
 
             *ep++ = NEWER_REFERENCE_EXT;
 
@@ -3999,8 +4015,12 @@ store_in_vec_aux(TTBEncodeContext *ctx,
     Uint iov_len;
     ErlIOVec *feiovp;
 
-    ASSERT(((byte *) &bin->orig_bytes[0]) <= ptr);
-    ASSERT(ptr + len <= ((byte *) &bin->orig_bytes[0]) + bin->orig_size);
+#ifdef DEBUG
+    if (!(bin->intern.flags & BIN_FLAG_MAGIC)) {
+        ASSERT(((byte *) &bin->orig_bytes[0]) <= ptr);
+        ASSERT(ptr + len <= ((byte *) &bin->orig_bytes[0]) + bin->orig_size);
+    }
+#endif
 
     if (ctx->frag_ix >= 0) {
         feiovp = &ctx->fragment_eiovs[ctx->frag_ix];
@@ -4735,7 +4755,7 @@ dec_term_atom_common:
 	    }
 	case BINARY_EXT:
 	    {
-		Uint32 nu = get_uint32(ep);
+                Uint nu = get_uint32(ep);
 		ep += 4;
 	    
                 ASSERT(IS_BINARY_SIZE_OK(nu));
@@ -4801,7 +4821,7 @@ dec_term_atom_common:
 		Eterm bin;
 		ErlSubBin* sb;
 		Uint bitsize;
-                Uint32 nu = get_uint32(ep);
+                Uint nu = get_uint32(ep);
 
                 ASSERT(IS_BINARY_SIZE_OK(nu));
 
@@ -5096,6 +5116,19 @@ dec_term_atom_common:
 		*objp = make_binary(sub);
 		break;
 	    }
+        case MAGIC_REF_INTERNAL_REF:
+            {
+                ErtsMRefThing* mrtp = (ErtsMRefThing*) hp;
+                sys_memcpy(mrtp, ep, sizeof(ErtsMRefThing));
+                ep += sizeof(ErtsMRefThing);
+                erts_refc_inc(&mrtp->mb->intern.refc, 2);
+                hp += ERTS_MAGIC_REF_THING_SIZE;
+                mrtp->next = factory->off_heap->first;
+                factory->off_heap->first = (struct erl_off_heap_header*)mrtp;
+                *objp = make_internal_ref(mrtp);
+                ASSERT(is_internal_magic_ref(*objp));
+                break;
+            }
 
         case LOCAL_EXT:
             internal_nc = !0;
@@ -5372,20 +5405,24 @@ encode_size_struct_int(TTBSizeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj,
 	    result += (1 + 2 + nlen + 4 + 4*i);
 	    break;
         }
-	case REF_DEF: {
-            int nlen;
-            i = internal_ref_no_numbers(obj);
-            if (dflags & (DFLAG_ETS_COMPRESSED|DFLAG_LOCAL_EXT)) {
-                nlen = 1;
+	case REF_DEF:
+            if ((dflags & DFLAG_ETS_COMPRESSED) && is_internal_magic_ref(obj)) {
+                result += 1 + sizeof(ErtsMRefThing);
             }
             else {
-                nlen = encode_atom_size(acmp,
-                                        internal_ref_node_name(obj),
-                                        dflags);
+                int nlen;
+                i = internal_ref_no_numbers(obj);
+                if (dflags & (DFLAG_ETS_COMPRESSED|DFLAG_LOCAL_EXT)) {
+                    nlen = 1;
+                }
+                else {
+                    nlen = encode_atom_size(acmp,
+                                            internal_ref_node_name(obj),
+                                            dflags);
+                }
+                result += (1 + 2 + nlen + 4 + 4*i);
             }
-	    result += (1 + 2 + nlen + 4 + 4*i);
-	    break;
-        }
+            break;
         case EXTERNAL_PORT_DEF: {
             int nlen = encode_atom_size(acmp,
                                         external_port_node_name(obj),
@@ -6029,7 +6066,12 @@ init_done:
 	    SKIP(2+sizeof(ProcBin));
 	    heap_size += PROC_BIN_SIZE + ERL_SUB_BIN_SIZE;
 	    break;
-            CHKSIZE(1);
+        case MAGIC_REF_INTERNAL_REF:
+            if (!internal_tags)
+                goto error;
+            SKIP(sizeof(ErtsMRefThing));
+            heap_size += ERTS_MAGIC_REF_THING_SIZE;
+            break;
         case LOCAL_EXT:
             /*
              * Currently the hash is 4 bytes large...

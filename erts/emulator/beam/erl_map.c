@@ -2418,7 +2418,7 @@ Eterm* hashmap_iterator_prev(ErtsWStack* s) {
 		}
 		ASSERT(is_boxed(ptr[idx]));
 		node = ptr[idx];
-		idx = 17;
+		idx = UINT_MAX;
 	    }
 	    else
 		break; /* and pop parent node */
@@ -2609,7 +2609,7 @@ int erts_hashmap_insert_down(Uint32 hx, Eterm key, Eterm value, Eterm node, Uint
                             ckey = CAR(kv);
                             c = CMP_TERM(key, ckey);
                             if (c == 0) {
-                                if (CDR(ptr) == value) {
+                                if (CDR(kv) == value) {
                                     *sz = 0;
                                     return 1;
                                 }

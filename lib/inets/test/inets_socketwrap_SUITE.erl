@@ -79,9 +79,9 @@ start_httpd_fd(Config) when is_list(Config) ->
 	    case open_port({spawn_executable, Wrapper},
                            [stderr_to_stdout,{args,Args}]) of
 	    	Port when is_port(Port) ->
-		    wait_node_up(Node, 10),
+		    wait_node_up(Node, 200),
 		    ct:pal("~p", [rpc:call(Node, init, get_argument, [httpd_80])]),
-		    ok  = rpc:call(Node, inets, start, []),
+		    {ok, _} = rpc:call(Node, application, ensure_all_started, [inets]),
 		    {ok, Pid} = rpc:call(Node, inets, start, [httpd, HttpdConf]),
 		    [{port, InetPort}] = rpc:call(Node, httpd, info, [Pid, [port]]),
 		    rpc:call(Node, erlang, halt, []);
@@ -117,6 +117,6 @@ wait_node_up(Node, N) ->
 	pong ->
 	    ok;
 	pang ->
-	    ct:sleep(5000),
+	    ct:sleep(250),
 	    wait_node_up(Node, N-1)
     end.

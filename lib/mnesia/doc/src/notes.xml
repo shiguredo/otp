@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>1996</year><year>2022</year>
+      <year>1996</year><year>2023</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -39,7 +39,57 @@
     thus constitutes one section in this document. The title of each
     section is the version number of Mnesia.</p>
 
-  <section><title>Mnesia 4.22</title>
+  <section><title>Mnesia 4.23</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Document <c>mnesia:foldl/4</c> and <c>mnesia:foldr/4</c>.</p>
+          <p>
+	    Own Id: OTP-18798</p>
+        </item>
+        <item>
+          <p>
+	    <c>mnesia:add_table_copy/3</c> no longer fails with
+	    reason system_limit when the node is starting.</p>
+          <p>
+	    Own Id: OTP-18850</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Restore recreate of disc_only tables could crash if they
+	    had an index.</p>
+          <p>
+	    Own Id: OTP-18843 Aux Id: GH-7766 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Mnesia 4.22.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Do not delete old backup file if the new backup fails.</p>
+          <p>
+	    Own Id: OTP-18711 Aux Id: ERIERL-963 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Mnesia 4.22</title>
 
     <section><title>Improvements and New Features</title>
       <list>
@@ -57,6 +107,21 @@
 	    *** POTENTIAL INCOMPATIBILITY ***</p>
           <p>
 	    Own Id: OTP-18490 Aux Id: OTP-18471, GH-6339, PR-6843 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+  <section><title>Mnesia 4.21.4.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Do not delete old backup file if the new backup fails.</p>
+          <p>
+	    Own Id: OTP-18711 Aux Id: ERIERL-963 </p>
         </item>
       </list>
     </section>
@@ -171,6 +236,21 @@
 	    Documentation fixes.</p>
           <p>
 	    Own Id: OTP-17930</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+  <section><title>Mnesia 4.20.4.3</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Do not delete old backup file if the new backup fails.</p>
+          <p>
+	    Own Id: OTP-18711 Aux Id: ERIERL-963 </p>
         </item>
       </list>
     </section>

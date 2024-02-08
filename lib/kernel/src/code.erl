@@ -187,10 +187,10 @@ ensure_loaded(Mod) when is_atom(Mod) ->
     case erlang:module_loaded(Mod) of
         true -> {module, Mod};
         false ->
-            case get_object_code(Mod) of
-                error -> call({sync_ensure_on_load, Mod});
-                {Mod,Binary,File} ->
-                    load_module(Mod, File, Binary, false, true)
+            case call({get_object_code_for_loading, Mod}) of
+                {module, Mod} -> {module, Mod};
+                {error, What} -> {error, What};
+                {Mod,Binary,File,Ref} -> load_module(Mod, File, Binary, false, Ref)
             end
     end.
 
@@ -914,14 +914,17 @@ get_doc(Mod, #{sources:=[Source|Sources]}=Options) ->
     end,
     case which(Mod) of
         preloaded ->
-            ErtsDir = code:lib_dir(erts),
-            ErtsEbinDir =
-                case filelib:is_dir(filename:join([ErtsDir,"ebin"])) of
-                    true -> filename:join([ErtsDir,"ebin"]);
-                    false -> filename:join([ErtsDir,"preloaded","ebin"])
-                end,
-            Fn = filename:join([ErtsEbinDir, atom_to_list(Mod) ++ ".beam"]),
-            GetDoc(Fn);
+            case code:lib_dir(erts) of
+                {error, _} -> {error, missing};
+                ErtsDir ->
+                    ErtsEbinDir =
+                        case filelib:is_dir(filename:join([ErtsDir,"ebin"])) of
+                            true -> filename:join([ErtsDir,"ebin"]);
+                            false -> filename:join([ErtsDir,"preloaded","ebin"])
+                        end,
+                    Fn = filename:join([ErtsEbinDir, atom_to_list(Mod) ++ ".beam"]),
+                    GetDoc(Fn)
+            end;
         Error when is_atom(Error) ->
             {error, Error};
         Fn ->

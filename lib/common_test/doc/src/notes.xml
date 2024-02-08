@@ -33,6 +33,101 @@
     <file>notes.xml</file>
     </header>
 
+<section><title>Common_Test 1.26</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    With this change, common_test returns an error when suite
+	    with a badly defined group is executed.</p>
+          <p>
+	    *** POTENTIAL INCOMPATIBILITY ***</p>
+          <p>
+	    Own Id: OTP-18728 Aux Id: PR-7487, PR-7674 </p>
+        </item>
+        <item>
+          <p>
+	    With this change, stylesheet option is applied to all
+	    HTML report pages.</p>
+          <p>
+	    Own Id: OTP-18760</p>
+        </item>
+        <item>
+          <p>
+	    Update all &lt;tt&gt; html tags to be &lt;code&gt;
+	    instead.</p>
+          <p>
+	    Own Id: OTP-18799 Aux Id: PR-7695 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    This change fixes docs, so that historically deprecated
+	    ?config macro is no longer recommended to be used.</p>
+          <p>
+	    Own Id: OTP-18858 Aux Id: PR-7825 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Common_Test 1.25.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    With this change, ct_hooks manual refers to CTH execution
+	    order section in user guide.</p>
+          <p>
+	    Own Id: OTP-14480 Aux Id: ERIERL-43, OTP-11894, PR-7455 </p>
+        </item>
+        <item>
+          <p>
+	    With this change, Config data from pre_end_per_testcase
+	    hook is delivered to post_end_per_testcase callback in
+	    case of testcase timetrap or linked process crash.</p>
+          <p>
+	    Own Id: OTP-18579 Aux Id: GH-7119 </p>
+        </item>
+        <item>
+          <p>
+	    With this change, remaining references to not supported
+	    vts tool in ct_run are removed (mainly relates to docs
+	    and ct_run help message).</p>
+          <p>
+	    Own Id: OTP-18615 Aux Id: PR-7234 </p>
+        </item>
+        <item>
+          <p>
+	    With this change, prompt search functionality in
+	    ct_telnet handles unicode input.</p>
+          <p>
+	    Own Id: OTP-18664 Aux Id: ERIERL-959 </p>
+        </item>
+        <item>
+          <p>
+	    Expanded the documentation about how to use the
+	    <c>standard_io</c>, <c>standard_error</c> and <c>user</c>
+	    I/O devices.</p>
+          <p>
+	    Added the types <c>io:standard_io/0</c>,
+	    <c>io:standard:error/0</c> and <c>io:user/0</c>.</p>
+          <p>
+	    Own Id: OTP-18676 Aux Id: PR-7473 GH-7459 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
 <section><title>Common_Test 1.25</title>
 
     <section><title>Fixed Bugs and Malfunctions</title>
@@ -71,6 +166,22 @@
 	    function alias to <c>dbg:stop/0</c></p>
           <p>
 	    Own Id: OTP-18478 Aux Id: GH-6903 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Common_Test 1.24.0.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    With this change, prompt search functionality in
+	    ct_telnet handles unicode input.</p>
+          <p>
+	    Own Id: OTP-18664 Aux Id: ERIERL-959 </p>
         </item>
       </list>
     </section>
@@ -3925,7 +4036,7 @@
         </item>
         <item>
           <p>
-	    If a timetrap timeout occurred during execution of of a
+	    If a timetrap timeout occurred during execution of a
 	    function in a lib module (i.e. a function called directly
 	    or indirectly from a test case), the Suite argument in
 	    the end_tc/3 framework callback function would not
@@ -5016,7 +5127,7 @@
         <item>
           <p>
 	    The rx library, included with common_test, failed to
-	    build on on some architectures because the -fPIC compiler
+	    build on some architectures because the -fPIC compiler
 	    option was missing.</p>
           <p>
 	    Own Id: OTP-7111</p>

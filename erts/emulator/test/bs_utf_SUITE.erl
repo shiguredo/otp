@@ -67,7 +67,7 @@ do_utf8_roundtrip(First, Last) when First =< Last ->
 
     %% Here a heap binary and a sub binary will be allocated. If the
     %% write in the utf8 segment extends beyond the end of heap binary,
-    %% it will will overwrite the header for the sub binary.
+    %% it will overwrite the header for the sub binary.
     <<-1:(64-9)/signed,Bin/binary>> = id(<<-1:(64-9),First/utf8>>),
     <<-1:63/signed,Bin/binary>> = id(<<-1:63,First/utf8>>),
 
@@ -490,7 +490,8 @@ get_data_dir(Config) ->
     Data = proplists:get_value(data_dir, Config),
     Opts = [{return,list}],
     Suffixes = ["_no_opt_SUITE",
-                "_r25_SUITE"],
+                "_r25_SUITE",
+                "_stripped_types_SUITE"],
     lists:foldl(fun(Suffix, Acc) ->
                         Opts = [{return,list}],
                         re:replace(Acc, Suffix, "_SUITE", Opts)

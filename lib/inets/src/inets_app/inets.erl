@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2022. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -47,12 +47,12 @@
 %% Description: Starts the inets application. Default type
 %% is temporary. see application(3)
 %%--------------------------------------------------------------------
-start() -> 
-    application:start(inets).
+start() ->
+    application:start(inets, temporary).
 
-start(Type) -> 
+start(Type) ->
+    application:ensure_all_started(ssl),
     application:start(inets, Type).
-
 
 %%--------------------------------------------------------------------
 %% Function: start(Service, ServiceConfig [, How]) -> {ok, Pid} | 
@@ -92,7 +92,7 @@ start(Service, ServiceConfig, How) ->
 %%
 %% Description: Stops the inets application.
 %%--------------------------------------------------------------------
-stop() -> 
+stop() ->
     application:stop(inets).
 
 

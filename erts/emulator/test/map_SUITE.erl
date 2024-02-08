@@ -2990,7 +2990,7 @@ t_maps_without(_Config) ->
 
 %% MISC
 
-%% Verify that the the number of nodes in hashmaps
+%% Verify that the number of nodes in hashmaps
 %% of different types and sizes does not deviate too
 %% much from the theoretical model.
 %% For debug with DBG_HASHMAP_COLLISION_BONANZA the test will expect
@@ -3786,7 +3786,7 @@ make_nontrivial_map(N, Effort) ->
     maps:from_list(L).
 
 verify_map_term(Term) ->
-    Printed = string:chomp(erts_debug:display(Term)),
+    Printed = string:chomp(erts_internal:term_to_string(Term)),
     {ok,Tokens,1} = erl_scan:string(Printed ++ "."),
     {ok,ParsedTerm} = erl_parse:parse_term(Tokens),
 

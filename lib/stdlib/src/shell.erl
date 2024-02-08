@@ -58,11 +58,11 @@ non_local_allowed(_,_,State) ->
 -spec start_interactive() -> ok | {error, already_started}.
 start_interactive() ->
     user_drv:start_shell().
--spec start_interactive(noshell | mfa()) ->
+-spec start_interactive(noshell | {module(), atom(), [term()]}) ->
           ok | {error, already_started};
                        ({remote, string()}) ->
           ok | {error, already_started | noconnection};
-                       ({node(), mfa()} | {remote, string(), mfa()}) ->
+                       ({node(), {module(), atom(), [term()]}} | {remote, string(), {module(), atom(), [term()]}}) ->
           ok | {error, already_started | noconnection | badfile | nofile | on_load_failure}.
 start_interactive({Node, {M, F, A}}) ->
     user_drv:start_shell(#{ initial_shell => {Node, M, F ,A} });
@@ -237,6 +237,8 @@ server_loop(N0, Eval_0, Bs00, RT, FT, Ds00, History0, Results0) ->
                     if
                         HB ->
                             garb(self());
+                        Results < Results0 ->
+                            garb(self());
                         true ->
                             ok
                     end,
@@ -277,7 +279,7 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                                         [text,{reserved_word_fun,ResWordFun}])
                   of
                       {ok,Toks,_EndPos} ->
-                          %% NOTE: we can handle function definitions, records and soon type declarations
+                          %% NOTE: we can handle function definitions, records and type declarations
                           %% but this cannot be handled by the function which only expects erl_parse:abstract_expressions()
                           %% for now just pattern match against those types and pass the string to shell local func.
                           case Toks of
@@ -298,7 +300,8 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                                   case Atom of
                                       record -> SpecialCase(rd);
                                       spec -> SpecialCase(ft);
-                                      type -> SpecialCase(td)
+                                      type -> SpecialCase(td);
+                                      _ -> erl_eval:extended_parse_exprs(Toks)
                                   end;
                               [{atom, _, FunName}, {'(', _}|_] ->
                                   case erl_parse:parse_form(Toks) of
@@ -971,7 +974,7 @@ not_restricted(exit, []) ->
     true;
 not_restricted(fl, []) ->
     true;
-not_restricted(fd, [_]) ->
+not_restricted(fd, [_,_]) ->
     true;
 not_restricted(ft, [_]) ->
     true;
@@ -996,6 +999,8 @@ not_restricted(rr, [_]) ->
 not_restricted(rr, [_,_]) ->
     true;
 not_restricted(rr, [_,_,_]) ->
+    true;
+not_restricted(v, [_]) ->
     true;
 not_restricted(_, _) ->
     false.

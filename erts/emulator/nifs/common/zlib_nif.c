@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson 2017-2021. All Rights Reserved.
+ * Copyright Ericsson 2017-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -472,7 +472,7 @@ static ERL_NIF_TERM zlib_codec(int (*codec)(z_stream*, int),
         }
 
         return enif_make_tuple3(env, am_need_dictionary,
-            enif_make_int(env, d->s.adler), flushed_output);
+            enif_make_ulong(env, d->s.adler), flushed_output);
     }
 }
 
@@ -669,7 +669,7 @@ static ERL_NIF_TERM zlib_deflateSetDictionary(ErlNifEnv *env, int argc, const ER
             checksum = adler32(0, bin.data, bin.size);
         }
 
-        return enif_make_int(env, checksum);
+        return enif_make_ulong(env, checksum);
     }
 
     return zlib_return(env, res);

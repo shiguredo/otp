@@ -42,7 +42,9 @@
       evaluated and a value is returned. The shell provides an Emacs like set of
       shortcuts for editing the text of the current line. See <seeguide marker="erts:tty">
       tty - A Command-Line Interface</seeguide> in the ERTS User's Guide
-      for a list of all available shortcuts.</p>
+      for a list of all available shortcuts.
+      You may also change the shortcuts to suit your preferences more, see
+      <seeerl marker="stdlib:edlin">edlin - line editor in the shell</seeerl>.</p>
 
     <p>A history mechanism saves previous commands and their
       values, which can then be incorporated in later commands.
@@ -144,6 +146,8 @@
       <tag><c>f(X)</c></tag>
       <item>
         <p>Removes the binding of variable <c>X</c>.</p>
+        <note><p>If a huge value is stored in a variable binding, you have to both call <c>f(X)</c> and
+    call <c>history(0)</c> or <c>results(0)</c> to free up that memory.</p></note>
       </item>
       <tag><c>h()</c></tag>
       <item>

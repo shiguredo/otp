@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2022. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -840,7 +840,19 @@ scan_string(Cs, #erl_scan{}=St, Line, Col, Toks, {Wcs,Str,Line0,Col0}) ->
             scan_error({string,$\",Estr}, Line0, Col0, Nline, Ncol, Ncs); %"
         {Ncs,Nline,Ncol,Nstr,Nwcs} ->
             Anno = anno(Line0, Col0, St, ?STR(string, St, Nstr)),
-            scan1(Ncs, St, Nline, Ncol, [{string,Anno,Nwcs}|Toks])
+            scan_string_concat(
+              Ncs, St, Nline, Ncol, [{string,Anno,Nwcs}|Toks], [])
+        end.
+
+scan_string_concat(Cs, St, Line, Col, Toks, _) ->
+    case Cs of
+        [$"|_] ->
+            Anno = anno(Line, Col, St, ?STR(string, St, "")),
+            scan1(Cs, St, Line, Col, [{string_concat,Anno,""}|Toks]);
+        [] ->
+            {more,{Cs,St,Col,Toks,Line,[],fun scan_string_concat/6}};
+        _ ->
+            scan1(Cs, St, Line, Col, Toks)
     end.
 
 scan_qatom(Cs, #erl_scan{}=St, Line, Col, Toks, {Wcs,Str,Line0,Col0}) ->

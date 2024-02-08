@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>1997</year><year>2022</year>
+      <year>1997</year><year>2023</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -343,7 +343,7 @@
 	    <code>
 #{server_name => string()
   protocol => internal | 'TCP' | 'TLS' | 'HTTP',
-  transport => "TCP "| "TLS", %% Present when protocol = 'HTTP'
+  transport => "TCP" | "TLS", %% Present when protocol = 'HTTP'
   uri => string(), %% Present when protocol = 'HTTP' and URI is valid
   peer => inet:peername(),
   host => inet:hostname(),

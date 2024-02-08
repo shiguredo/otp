@@ -77,7 +77,9 @@
 
 %% Misc utility functions
 -export([
-	 which_socket_kind/1
+	 which_socket_kind/1,
+         options/0, options/1, options/2, option/1, option/2,
+         protocols/0, protocol/1
 	]).
 
 -export_type([
@@ -93,6 +95,7 @@
               completion_info/0,
 
               invalid/0,
+              eei/0,
 
               socket_counters/0,
               socket_info/0,
@@ -155,13 +158,20 @@
 
 %% We need #file_descriptor{} for sendfile/2,3,4,5
 -include("file_int.hrl").
+%% -include("socket_int.hrl").
 
-%% -define(DBG(T), erlang:display({{self(), ?MODULE, ?LINE, ?FUNCTION_NAME}, T})).
+%% -define(DBG(T),
+%%         erlang:display({{self(), ?MODULE, ?LINE, ?FUNCTION_NAME}, T})).
 
 %% Also in prim_socket
 -define(REGISTRY, socket_registry).
 
 -type invalid() :: {invalid, What :: term()}.
+
+%% Extended Error Information
+-type eei() :: #{info := econnreset | econnaborted |
+                 netname_deleted | too_many_cmds | atom(),
+                 raw_info := term()}.
 
 -type info() ::
         #{counters     := #{atom() := non_neg_integer()},
@@ -415,14 +425,18 @@
            acceptfilter |
            bindtodevice |
            broadcast |
+           bsp_state |
            busy_poll |
            debug |
            domain |
            dontroute |
            error |
+           exclusiveaddruse |
            keepalive |
            linger |
            mark |
+           maxdg |
+           max_msg_size |
            oobinline |
            passcred |
            peek_off |
@@ -779,8 +793,21 @@
 %% Interface term formats
 %%
 
--opaque select_tag()     :: atom() | {atom(), ContData :: term()}.
--opaque completion_tag() :: atom(). % | {atom(), ContData :: term()}.
+-define(ASYNCH_DATA_TAG, (recv | recvfrom | recvmsg |
+                          send | sendto | sendmsg)).
+-define(ASYNCH_TAG,      ((accept | connect) | ?ASYNCH_DATA_TAG)).
+
+%% -type asynch_data_tag() :: send | sendto | sendmsg |
+%%                            recv | recvfrom | recvmsg |
+%%                            sendfile.
+%% -type asynch_tag()      :: connect | accept |
+%%                            asynch_data_tag().
+%% -type select_tag()      :: asynch_tag() |
+%%                            {asynch_data_tag(), ContData :: term()}.
+%% -type completion_tag()  :: asynch_tag().
+-type select_tag()      :: ?ASYNCH_TAG | sendfile | 
+                           {?ASYNCH_DATA_TAG | sendfile, ContData :: term()}.
+-type completion_tag()  :: ?ASYNCH_TAG.
 
 -type select_handle() :: reference().
 -type completion_handle() :: reference().
@@ -1395,6 +1422,34 @@ is_supported(options, Level, Opt) when is_atom(Level), is_atom(Opt) ->
     is_supported(options, {Level,Opt}).
 
 
+options() ->
+    lists:sort(supports(options)).
+
+options(Level) ->
+    [{Opt, Supported} || {{Lvl, Opt}, Supported} <- options(), (Lvl =:= Level)].
+
+options(Level, Supported) ->
+    [Opt || {Opt, Sup} <- options(Level), (Sup =:= Supported)].
+
+option({Level, Opt}) ->
+    lists:member(Opt, options(Level, true)).
+option(Level, Opt) ->
+    option({Level, Opt}).
+
+
+protocols() ->
+    lists:sort(supports(protocols)).
+
+protocol(Proto) ->
+    case lists:keysearch(Proto, 1, protocols()) of
+        {value, {Proto, Supported}} ->
+            Supported;
+        false ->
+            false
+    end.
+
+
+
 %% ===========================================================================
 %%
 %% The proper socket API
@@ -1933,7 +1988,8 @@ send(Socket, Data) ->
       RestData       :: binary(),
       SelectInfo     :: select_info(),
       CompletionInfo :: completion_info(),
-      Reason         :: posix() | 'closed' | invalid();
+      Reason         :: posix() | 'closed' | invalid() |
+                        netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Handle :: select_handle() | completion_handle()) ->
                   'ok' |
@@ -1948,7 +2004,8 @@ send(Socket, Data) ->
       RestData       :: binary(),
       SelectInfo     :: select_info(),
       CompletionInfo :: completion_info(),
-      Reason         :: posix() | 'closed' | invalid();
+      Reason         :: posix() | 'closed' | invalid() |
+                        netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Timeout :: 'infinity') ->
                   'ok' |
@@ -1959,7 +2016,8 @@ send(Socket, Data) ->
       Socket     :: socket(),
       Data       :: iodata(),
       RestData   :: binary(),
-      Reason     :: posix() | 'closed' | invalid();
+      Reason     :: posix() | 'closed' | invalid() |
+                    netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Timeout :: non_neg_integer()) ->
                   'ok' |
@@ -1970,7 +2028,8 @@ send(Socket, Data) ->
       Socket     :: socket(),
       Data       :: iodata(),
       RestData   :: binary(),
-      Reason     :: posix() | 'closed' | invalid().
+      Reason     :: posix() | 'closed' | invalid() |
+                    netname_deleted | too_many_cmds | eei().
 
 send(Socket, Data, Flags_Cont)
   when is_list(Flags_Cont);
@@ -1994,7 +2053,8 @@ send(Socket, Data, Timeout) ->
       RestData       :: binary(),
       SelectInfo     :: select_info(),
       CompletionInfo :: completion_info(),
-      Reason         :: posix() | 'closed' | invalid();
+      Reason         :: posix() | 'closed' | invalid() |
+                        netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Flags, Handle :: select_handle() | completion_handle()) ->
                   'ok' |
@@ -2010,7 +2070,8 @@ send(Socket, Data, Timeout) ->
       RestData       :: binary(),
       SelectInfo     :: select_info(),
       CompletionInfo :: completion_info(),
-      Reason         :: posix() | 'closed' | invalid();
+      Reason         :: posix() | 'closed' | invalid() |
+                        netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Flags, Timeout :: 'infinity') ->
                   'ok' |
@@ -2022,7 +2083,8 @@ send(Socket, Data, Timeout) ->
       Data       :: iodata(),
       Flags      :: [msg_flag() | integer()],
       RestData   :: binary(),
-      Reason     :: posix() | 'closed' | invalid();
+      Reason     :: posix() | 'closed' | invalid() |
+                    netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Flags, Timeout :: non_neg_integer()) ->
                   'ok' |
@@ -2034,7 +2096,8 @@ send(Socket, Data, Timeout) ->
       Data       :: iodata(),
       Flags      :: [msg_flag() | integer()],
       RestData   :: binary(),
-      Reason     :: posix() | 'closed' | invalid();
+      Reason     :: posix() | 'closed' | invalid() |
+                    netname_deleted | too_many_cmds | eei();
 
           (Socket, Data, Cont, SelectHandle :: 'nowait') ->
                   'ok' |
@@ -2222,6 +2285,7 @@ send_common_deadline_result(
                 ?socket_msg(_Socket, abort, {Handle, Reason}) ->
                     send_common_error(Reason, Data, false)
             after Timeout ->
+		    %% ?DBG(['completion send timeout - cancel']),
                     _ = cancel(SockRef, Op, Handle),
                     send_common_error(timeout, Data, false)
             end;
@@ -4373,15 +4437,39 @@ peername(Socket) ->
 %%
 %%
 
--spec ioctl(Socket, GetRequest) -> {'ok', IFConf} | {'error', Reason} when
-      Socket     :: socket(),
-      GetRequest :: 'gifconf',
-      IFConf     :: [#{name := string, addr := sockaddr()}],
-      Reason     :: posix() | 'closed'.
+-spec ioctl(Socket, GetRequest :: 'gifconf') ->
+          {'ok', IFConf :: [#{name := string, addr := sockaddr()}]} |
+          {'error', Reason} when
+      Socket :: socket(),
+      Reason :: posix() | 'closed';
 
-%% gifconf | {gifaddr, string()} | {gifindex, string()} | {gifname, integer()}
+           (Socket, GetRequest :: 'nread' | 'nwrite' | 'nspace') ->
+          {'ok', NumBytes :: non_neg_integer()} | {'error', Reason} when
+      Socket :: socket(),
+      Reason :: posix() | 'closed';
+
+           (Socket, GetRequest :: 'atmark') ->
+          {'ok', Available :: boolean()} | {'error', Reason} when
+      Socket :: socket(),
+      Reason :: posix() | 'closed';
+
+           (Socket, GetRequest :: 'tcp_info') ->
+          {'ok', Info :: map()} | {'error', Reason} when
+      Socket :: socket(),
+      Reason :: posix() | 'closed'.
+
+%% gifconf | nread | nwrite | nspace | atmark |
+%% {gifaddr, string()} | {gifindex, string()} | {gifname, integer()}
 ioctl(?socket(SockRef), gifconf = GetRequest) ->
     prim_socket:ioctl(SockRef, GetRequest);
+ioctl(?socket(SockRef), GetRequest) when (nread =:= GetRequest) orelse
+                                         (nwrite =:= GetRequest) orelse
+                                         (nspace =:= GetRequest) ->
+    prim_socket:ioctl(SockRef, GetRequest);
+ioctl(?socket(SockRef), GetRequest) when (atmark =:= GetRequest) ->
+    prim_socket:ioctl(SockRef, GetRequest);
+ioctl(Socket, GetRequest) when (tcp_info =:= GetRequest) ->
+    ioctl(Socket, GetRequest, 0);
 ioctl(Socket, GetRequest) ->
     erlang:error(badarg, [Socket, GetRequest]).
 
@@ -4457,10 +4545,21 @@ ioctl(Socket, GetRequest) ->
       GetRequest  :: 'gifname' | 'gifindex' |
                      'gifaddr' | 'gifdstaddr' | 'gifbrdaddr' |
                      'gifnetmask' | 'gifhwaddr' |
-                     'gifmtu' | 'giftxqlen' | 'gifflags',
+                     'gifmtu' | 'giftxqlen' | 'gifflags' |
+		     'tcp_info',
       NameOrIndex :: string() | integer(),
       Result      :: term(),
-      Reason      :: posix() | 'closed'.
+      Reason      :: posix() | 'closed';
+	   (Socket, SetRequest, Value) -> ok | {'error', Reason} when
+      Socket     :: socket(),
+      SetRequest :: 'rcvall',
+      Value      :: off | on | iplevel,
+      Reason     :: posix() | 'closed';
+	   (Socket, SetRequest, Value) -> ok | {'error', Reason} when
+      Socket     :: socket(),
+      SetRequest :: 'rcvall_igmpmcast' | 'rcvall_mcast',
+      Value      :: off | on,
+      Reason     :: posix() | 'closed'.
 
 ioctl(?socket(SockRef), gifname = GetRequest, Index)
   when is_integer(Index) ->
@@ -4495,8 +4594,25 @@ ioctl(?socket(SockRef), gifflags = GetRequest, Name)
 ioctl(?socket(SockRef), gifmap = GetRequest, Name)
   when is_list(Name) ->
     prim_socket:ioctl(SockRef, GetRequest, Name);
-ioctl(Socket, GetRequest, Arg) ->
-    erlang:error(badarg, [Socket, GetRequest, Arg]).
+
+ioctl(?socket(SockRef), tcp_info = GetRequest, Version)
+  when (Version =:= 0) ->
+    prim_socket:ioctl(SockRef, GetRequest, Version);
+
+ioctl(?socket(SockRef), rcvall = SetRequest, Value)
+  when (Value =:= off) orelse
+       (Value =:= on)  orelse
+       (Value =:= iplevel) ->
+    prim_socket:ioctl(SockRef, SetRequest, Value);
+ioctl(?socket(SockRef), SetRequest, Value)
+  when ((SetRequest =:= rcvall_igmpmcast) orelse
+        (SetRequest =:= rcvall_mcast)) andalso
+       ((Value =:= off) orelse
+        (Value =:= on)) ->
+    prim_socket:ioctl(SockRef, SetRequest, Value);
+
+ioctl(Socket, Request, Arg) ->
+    erlang:error(badarg, [Socket, Request, Arg]).
 
 
 -spec ioctl(Socket, SetRequest, Name, Value) -> 'ok' | {'error', Reason} when
@@ -4602,11 +4718,12 @@ cancel(SockRef, Op, Handle) ->
             _ = flush_abort_msg(SockRef, Handle),
             invalid;
         Result ->
-            %% Since we do not actually if we are using
+            %% Since we do not actually know if we are using
             %% select or completion here, so flush both...
             _ = flush_select_msg(SockRef, Handle),
             _ = flush_completion_msg(SockRef, Handle),
             _ = flush_abort_msg(SockRef, Handle),
+	    %% ?DBG([{op, Op}, {result, Result}]),
             Result
     end.
 

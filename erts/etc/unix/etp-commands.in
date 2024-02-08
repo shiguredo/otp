@@ -2,7 +2,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2005-2022. All Rights Reserved.
+# Copyright Ericsson AB 2005-2023. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -2474,7 +2474,7 @@ define etp-proc-state-int
     printf "active-sys | "
   end
   if ($arg0 & 0x80000)
-    printf "sig-in-q | "
+    printf "nmsig-in-q | "
   end
   if ($arg0 & 0x40000)
     printf "sys-tasks | "
@@ -2495,7 +2495,7 @@ define etp-proc-state-int
     printf "active | "
   end
   if ($arg0 & 0x1000)
-    printf "maybe-self-sigs | "
+    printf "msig-in-q | "
   end
   if ($arg0 & 0x800)
     printf "exiting | "
@@ -4369,7 +4369,7 @@ document etp-search-alloc
 %---------------------------------------------------------------------------
 % etp-search-heaps Eterm
 % 
-% Search all internal allocator memory blocks for for the specified Eterm.
+% Search all internal allocator memory blocks for the specified Eterm.
 %---------------------------------------------------------------------------
 end
 

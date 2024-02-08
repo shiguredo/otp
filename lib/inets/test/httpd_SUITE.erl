@@ -72,6 +72,9 @@ all() ->
      {group, https_security},
      {group, http_reload},
      {group, https_reload},
+     {group, http_default_type},
+     {group, http_mime_type},
+     {group, http_mime_and_default_type},
      {group, http_mime_types},
      {group, http_logging},
      {group, http_post},
@@ -79,11 +82,8 @@ all() ->
      {group, http_not_sup},
      {group, https_alert},
      {group, https_not_sup},
-     mime_types_format,
-     erl_script_timeout_default,
-     erl_script_timeout_option,
-     erl_script_timeout_proplist,
-     erl_script_alias_all
+     {group, esi},
+     mime_types_format
     ].
 
 groups() ->
@@ -111,7 +111,10 @@ groups() ->
      {http_not_sup, [], [{group, not_sup}]},
      {https_not_sup, [], [{group, not_sup}]},
      {https_alert, [], [tls_alert]},
-     {http_mime_types, [], [alias_1_1, alias_1_0]},
+     {http_default_type, [], [default_type]},
+     {http_mime_type, [], [mime_type]},
+     {http_mime_and_default_type, [], [mime_and_default_type]},
+     {http_mime_types, [parallel], [alias_1_1, alias_1_0]},
      {limit, [],  [content_length, max_clients_1_1]},
      {custom, [],  [customize, add_default]},
      {reload, [], [non_disturbing_reconfiger_dies,
@@ -130,13 +133,19 @@ groups() ->
      {security, [], [security_1_1, security_1_0]},
      {logging, [], [disk_log_internal, disk_log_exists,
              disk_log_bad_size, disk_log_bad_file]},
-     {http_1_1, [],
+     {http_1_1, [], [esi_propagate, esi_atom_leak, {group, http_1_1_parallel}] ++ load()},
+     {http_1_1_parallel, [parallel],
       [host, chunked, expect, cgi, cgi_chunked_encoding_test,
        trace, range, if_modified_since, mod_esi_chunk_timeout,
-       esi_put, esi_patch, esi_post, esi_proagate, esi_atom_leak, esi_headers]
-      ++ http_head() ++ http_get() ++ load()},
-     {http_1_0, [], [host, cgi, trace] ++ http_head() ++ http_get() ++ load()},
+       esi_put, esi_patch, esi_post, esi_headers]
+      ++ http_head() ++ http_get()},
+     {http_1_0, [], [{group, http_1_0_parallel} | load()]},
+     {http_1_0_parallel, [parallel], [host, cgi, trace] ++ http_head() ++ http_get()},
      {http_rel_path_script_alias, [], [cgi]},
+     {esi, [], [erl_script_timeout_default,
+                erl_script_timeout_option,
+                erl_script_timeout_proplist,
+                erl_script_alias_all]},
      {not_sup, [], [put_not_sup]}
     ].
 
@@ -153,6 +162,7 @@ http_get() ->
      bad_dot_paths,
      %%actions, Add configuration so that this test mod_action
      esi,
+     filename_too_long,
      bad_hex,
      missing_CR,
      max_header,
@@ -237,13 +247,18 @@ init_per_group(Group, Config0)  when  Group == http_basic;
 				      Group == http_reload;
                                       Group == http_not_sup;
                                       Group == http_post;
+                                      Group == http_default_type;
+                                      Group == http_mime_type;
+				      Group == http_mime_and_default_type;
                                       Group == http_mime_types
 				      ->
     ok = start_apps(Group),
     init_httpd(Group, [{http_version, "HTTP/1.0"}, {type, ip_comm} | Config0]);
-init_per_group(http_1_1, Config) ->
+init_per_group(Group, Config) when Group == http_1_1_parallel;
+                                   Group == http_1_1 ->
     [{http_version, "HTTP/1.1"} | Config];
-init_per_group(http_1_0, Config) ->
+init_per_group(Group, Config) when Group == http_1_0_parallel;
+                                   Group == http_1_0 ->
     [{http_version, "HTTP/1.0"} | Config];
 init_per_group(auth_api, Config) -> 
     [{auth_prefix, ""} | Config];
@@ -262,6 +277,9 @@ init_per_group(http_rel_path_script_alias = Group, Config) ->
     init_httpd(Group, [{type, ip_comm},{http_version, "HTTP/1.1"}| Config]);
 init_per_group(not_sup, Config) ->
     [{http_version, "HTTP/1.1"} | Config];
+init_per_group(Group, Config) when Group == esi ->
+    ok = start_apps(Group),
+    Config;
 init_per_group(_, Config) ->
     Config.
 
@@ -274,7 +292,11 @@ end_per_group(Group, _Config)  when  Group == http_basic;
 				     Group == http_security;
 				     Group == http_reload;
                                      Group == http_post;
-                                     Group == http_mime_types
+                                     Group == http_default_type;
+                                     Group == http_mime_type;
+				     Group == http_mime_and_default_type;
+                                     Group == http_mime_types;
+                                     Group == esi
 				     ->
     inets:stop();
 end_per_group(Group, _Config) when  Group == https_basic;
@@ -303,7 +325,11 @@ init_per_testcase(Case, Config) when Case == host; Case == trace ->
     Cb = case Name of
 	     http_1_0 ->
 		 httpd_1_0;
+	     http_1_0_parallel ->
+		 httpd_1_0;
 	     http_1_1 ->
+		 httpd_1_1;
+	     http_1_1_parallel ->
 		 httpd_1_1
 	 end,
     dbg(
@@ -382,7 +408,7 @@ end_per_testcase(Case, Config) ->
 
 
 dbg(Case, Config, Status) ->
-    Cases = [esi_put],
+    Cases = [],
     case lists:member(Case, Cases) of
 	true ->
 	    case Status of
@@ -882,8 +908,8 @@ chunked(Config) when is_list(Config) ->
 		      proplists:get_value(host, Config), proplists:get_value(node, Config)).
 %%-------------------------------------------------------------------------
 expect() ->   
-    ["Check that the server handles request with the expect header "
-     "field appropriate"].
+    [{doc, "Check that the server handles request with the expect header "
+      "field appropriate"}].
 expect(Config) when is_list(Config) ->
     httpd_1_1:expect(proplists:get_value(type, Config), proplists:get_value(port, Config), 
 		     proplists:get_value(host, Config), proplists:get_value(node, Config)).
@@ -987,7 +1013,7 @@ mod_esi_chunk_timeout(Config) when is_list(Config) ->
 					 proplists:get_value(host, Config),
 					 proplists:get_value(node, Config)).
 %%-------------------------------------------------------------------------
-esi_proagate(Config)  when is_list(Config) -> 
+esi_propagate(Config) when is_list(Config) ->
     register(propagate_test, self()),
     ok = http_status("GET /cgi-bin/erl/httpd_example:new_status_and_location ",
                   Config, [{statuscode, 201}]),
@@ -1133,6 +1159,72 @@ cgi_chunked_encoding_test(Config) when is_list(Config) ->
 					    proplists:get_value(node, Config),
 					    Requests).
 %%-------------------------------------------------------------------------
+default_type() ->
+    [{doc, "Test default_type"}].
+
+default_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
+mime_type() ->
+    [{doc, "Test mime_type"}].
+
+mime_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
+mime_and_default_type() ->
+    [{doc, "Test that mime_type takes precedence over default_type"}].
+
+mime_and_default_type(Config) when is_list(Config) ->
+    TestURIs200 = [
+                   {"GET /file_without_extension ", 200, "text/html"},
+                   {"GET /file.with_nonstandard_extension ", 200, "text/html"}
+                  ],
+    Test200 =
+        fun({Request, ResultCode, ContentType}) ->
+                ct:log("Request: ~s Expecting: ~p ~s",
+                     [Request, ResultCode, ContentType]),
+                ok = http_status(Request, Config,
+                                 [{statuscode, ResultCode},
+                                  {header, "Content-Type", ContentType},
+                                  {header, "Server"},
+                                  {header, "Date"}])
+        end,
+    [Test200(T) || T <- TestURIs200],
+    ok.
+
+%%-------------------------------------------------------------------------
 alias_1_1() ->
     [{doc, "Test mod_alias"}].
 
@@ -1149,10 +1241,19 @@ alias() ->
     [{doc, "Test mod_alias"}].
 
 alias(Config) when is_list(Config) ->
+    Cgi = case os:type() of
+        {win32, _} ->
+            "printenv.bat";
+        _ ->
+            "printenv.sh"
+    end,
     TestURIs200 = [
                    {"GET /pics/icon.sheet.gif ", 200, "image/gif"},
+                   {"GET /pictures/icon.sheet.gif ", 200, "image/gif"},
                    {"GET / ", 200, "text/html"},
-                   {"GET /misc/ ", 200, "text/html"}
+                   {"GET /misc/ ", 200, "text/html"},
+                   {"GET /cgi-bin/" ++ Cgi ++ " ", 200, "text/html"},
+                   {"GET /cgi-UNWANTED-bin/" ++ Cgi ++ " ", 200, "text/html"}
                   ],
     Test200 =
         fun({Request, ResultCode, ContentType}) ->
@@ -1223,19 +1324,19 @@ trace(Config) when is_list(Config) ->
 	     proplists:get_value(host, Config), proplists:get_value(node, Config)).
 %%-------------------------------------------------------------------------
 light() ->
-    ["Test light load"].
+    [{doc, "Test light load"}].
 light(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config), 10).
 %%-------------------------------------------------------------------------
 medium() ->
-    ["Test  medium load"].
+    [{doc, "Test  medium load"}].
 medium(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config), 100).
 %%-------------------------------------------------------------------------
 heavy() ->
-    ["Test heavy load"].
+    [{doc, "Test heavy load"}].
 heavy(Config) when is_list(Config) ->
     httpd_load:load_test(proplists:get_value(type, Config), proplists:get_value(port, Config), proplists:get_value(host, Config), 
 			 proplists:get_value(node, Config),
@@ -1253,9 +1354,23 @@ content_length(Config) ->
 				       [{statuscode, 200},
 					{content_length, 274},
 					{version, Version}]).
+
+%-------------------------------------------------------------------------
+filename_too_long() ->
+    [{doc, "Tests what happens if supplied filename exceeds os-limit of filename characters."}].
+filename_too_long(Config) ->
+    Version = proplists:get_value(http_version, Config),
+    Host = proplists:get_value(host, Config),
+    TooLongFileName = lists:duplicate(257, $F),
+    ok = httpd_test_lib:verify_request(proplists:get_value(type, Config), Host,
+				       proplists:get_value(port, Config), proplists:get_value(node, Config),
+				       http_request("GET /" ++ TooLongFileName ++ " ", Version, Host),
+				       [{statuscode, 404},
+					{version, Version}]).
+
 %%-------------------------------------------------------------------------
 bad_hex() ->
-    ["Tests that a URI with a bad hexadecimal code is handled OTP-6003"].
+    [{doc, "Tests that a URI with a bad hexadecimal code is handled OTP-6003"}].
 bad_hex(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host = proplists:get_value(host, Config),
@@ -1267,7 +1382,7 @@ bad_hex(Config) ->
 					{version, Version}]).
 %%-------------------------------------------------------------------------
 missing_CR() ->
-     ["Tests missing CR in delimiter OTP-7304"].
+     [{doc, "Tests missing CR in delimiter OTP-7304"}].
 missing_CR(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1296,6 +1411,7 @@ customize(Config) when is_list(Config) ->
 					{no_header, "Server"},
 					{version, Version}]).
 
+%%-------------------------------------------------------------------------
 add_default() ->
     [{doc, "Test adding default header with custom callback"}].
 
@@ -1316,7 +1432,7 @@ add_default(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 max_header() ->
-    ["Denial Of Service (DOS) attack, prevented by max_header"].
+    [{doc, "Denial Of Service (DOS) attack, prevented by max_header"}].
 max_header(Config) when is_list(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1330,7 +1446,7 @@ max_header(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 max_content_length() ->
-    ["Denial Of Service (DOS) attack, prevented by max_content_length"].
+    [{doc, "Denial Of Service (DOS) attack, prevented by max_content_length"}].
 max_content_length(Config) when is_list(Config) ->
     Version = proplists:get_value(http_version, Config),
     Host =  proplists:get_value(host, Config),
@@ -1339,7 +1455,7 @@ max_content_length(Config) when is_list(Config) ->
 
 %%-------------------------------------------------------------------------
 ignore_invalid_header() ->
-    ["RFC 7230 - 3.2.4 ... No whitespace is allowed between the header field-name and colon"].
+    [{doc, "RFC 7230 - 3.2.4 ... No whitespace is allowed between the header field-name and colon"}].
 ignore_invalid_header(Config) when is_list(Config) ->
      Host =  proplists:get_value(host, Config),
      Port =  proplists:get_value(port, Config),
@@ -1372,9 +1488,7 @@ security(Config) ->
     Node = proplists:get_value(node, Config),
     ServerRoot = proplists:get_value(server_root, Config),
 
-    global:register_name(mod_security_test, self()),   % Receive events
-
-    ct:sleep(5000),
+    yes = global:register_name(mod_security_test, self()),   % Receive events
 
     OpenDir = filename:join([ServerRoot, "htdocs", "open"]),
 
@@ -1590,6 +1704,7 @@ disturbing_1_0(Config) when is_list(Config) ->
     disturbing([{http_version, "HTTP/1.0"} | Config]).
 
 disturbing(Config) when is_list(Config)->
+    LogWatcher = start_log_watcher(),
     Server =  proplists:get_value(server_pid, Config),
     Version = proplists:get_value(http_version, Config),
     Host = proplists:get_value(host, Config),
@@ -1606,12 +1721,13 @@ disturbing(Config) when is_list(Config)->
     Close = list_to_atom((typestr(Type)) ++ "_closed"),
     receive 
 	{Close, Socket} ->
-	    ok;
-	Msg ->
-	    ct:fail({{expected, {Close, Socket}}, {got, Msg}})
-    end,
-    inets_test_lib:close(Type, Socket),
-    [{server_name, "httpd_disturbing_" ++ Version}] =  httpd:info(Server, [server_name]).
+            inets_test_lib:close(Type, Socket),
+            [{server_name, "httpd_disturbing_" ++ Version}] =
+                httpd:info(Server, [server_name]),
+            [] = stop_log_watcher(LogWatcher),
+            [] = inets_test_lib:flush(),
+	    ok
+    end.
 %%-------------------------------------------------------------------------
 non_disturbing_1_1(Config) when is_list(Config) -> 
     non_disturbing([{http_version, "HTTP/1.1"} | Config]).
@@ -1671,7 +1787,6 @@ reload_config_file(Config) when is_list(Config) ->
     ok = file:write_file(HttpdConf, NewConfig),
     ok = httpd:reload_config(HttpdConf, non_disturbing),
     "httpd_test_new" = proplists:get_value(server_name, httpd:info(Server)).
-
 %%-------------------------------------------------------------------------
 mime_types_format(Config) when is_list(Config) -> 
     DataDir = proplists:get_value(data_dir, Config),
@@ -1783,20 +1898,14 @@ mime_types_format(Config) when is_list(Config) ->
      {"hqx","application/mac-binhex40"}]} = httpd_conf:load_mime_types(MimeTypes).
 
 erl_script_timeout_default(Config) when is_list(Config) ->
-    inets:start(),
-    {ok, Pid} =	inets:start(httpd,
-                            [{port, 0},
-                             {server_name,"localhost"},
-                             {server_root,"./"},
-                             {document_root,"./"},
-                             {bind_address, any},
-                             {mimetypes, [{"html", "text/html"}]},
-                             {modules,[mod_esi]},
-                             {erl_script_alias, {"/erl", [httpd_example]}}
-                            ]),
-    Info = httpd:info(Pid),
+    ServerConfig = [
+        {modules, [mod_esi]},
+        {erl_script_alias, {"/erl", [httpd_example]}}
+        | Config
+    ],
+    Httpd = init_httpd(esi, ServerConfig),
 
-    Port = proplists:get_value(port, Info),
+    Port = proplists:get_value(port, Httpd),
 
     %% Default erl_script_timeout is 15.
     %% Verify:  13 =< erl_script_timeout =< 17
@@ -1804,22 +1913,17 @@ erl_script_timeout_default(Config) when is_list(Config) ->
 
     {ok, {_, _, Body}} = httpc:request(get, {Url, []}, [{timeout, 45000}], []),
     ct:log("Response: ~p~n", [Body]),
-    verify_body(Body, 13000),
-    inets:stop().
+    verify_body(Body, 13000).
 
 erl_script_timeout_option(Config) when is_list(Config) ->
-    inets:start(),
-    {ok, Pid} =	inets:start(httpd,
-                            [{port, 0},
-                             {server_name,"localhost"},
-                             {server_root,"./"},
-                             {document_root,"./"},
-                             {bind_address, any},
-                             {mimetypes, [{"html", "text/html"}]},
-                             {modules,[mod_esi]},
-                             {erl_script_timeout, 2},
-                             {erl_script_alias, {"/erl", [httpd_example]}}
-                            ]),
+    ServerConfig = [
+        {modules, [mod_esi]},
+        {erl_script_timeout, 2},
+        {erl_script_alias, {"/erl", [httpd_example]}}
+        | Config
+    ],
+    ServerInfo = init_httpd(esi, ServerConfig),
+    Pid = proplists:get_value(server_pid, ServerInfo),
     Info = httpd:info(Pid),
     verify_timeout(Info, 2),
 
@@ -1830,8 +1934,7 @@ erl_script_timeout_option(Config) when is_list(Config) ->
 
     {ok, {_, _, Body}} = httpc:request(Url),
     ct:log("Response: ~p~n", [Body]),
-    verify_body(Body, 1000),
-    inets:stop().
+    verify_body(Body, 1000).
 
 erl_script_timeout_proplist(Config) when is_list(Config) ->
     HttpdConf = filename:join(get_tmp_dir(Config),
@@ -1849,7 +1952,6 @@ erl_script_timeout_proplist(Config) when is_list(Config) ->
         "].",
     ok = file:write_file(HttpdConf, ServerConfig),
 
-    inets:start(),
     {ok, Pid} =	inets:start(httpd,
                             [{proplist_file, HttpdConf}]),
     Info = httpd:info(Pid),
@@ -1862,8 +1964,7 @@ erl_script_timeout_proplist(Config) when is_list(Config) ->
 
     {ok, {_, _, Body}} = httpc:request(Url),
     ct:log("Response: ~p~n", [Body]),
-    verify_body(Body, 3000),
-    inets:stop().
+    verify_body(Body, 3000).
 
 erl_script_alias_all(Config0) when is_list(Config0) ->
     ok = start_apps(http_basic),
@@ -1872,8 +1973,7 @@ erl_script_alias_all(Config0) when is_list(Config0) ->
                Config0],
     Config2 = init_httpd(http_basic_erl_script_alias_all, Config1),
     ok = http_status("GET /cgi-bin/erl/httpd_example:get ",
-        	     Config2, [{statuscode, 200}]),
-    inets:stop().
+        	     Config2, [{statuscode, 200}]).
 
 tls_alert(Config) when is_list(Config) ->
     SSLOpts = proplists:get_value(client_alert_conf, Config),    
@@ -2025,10 +2125,14 @@ start_apps(Group) when  Group == http_basic;
 			Group == http_logging;
 			Group == http_reload;
                         Group == http_post;
+                        Group == http_default_type;
+                        Group == http_mime_type;
+                        Group == http_mime_and_default_type;
                         Group == http_mime_types;
                         Group == http_rel_path_script_alias;
                         Group == http_not_sup;
-                        Group == http_mime_types->
+                        Group == http_mime_types;
+                        Group == esi ->
     inets_test_lib:start_apps([inets]).
 
 server_start(_, HttpdConfig) ->
@@ -2122,6 +2226,12 @@ server_config(https_security, Config) ->
     tl(auth_conf(ServerRoot)) ++ security_conf(ServerRoot) ++ server_config(https, Config);
 server_config(http_logging, Config) ->
     log_conf() ++ server_config(http, Config);
+server_config(http_default_type, Config) ->
+    [{default_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
+server_config(http_mime_type, Config) ->
+    [{mime_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
+server_config(http_mime_and_default_type, Config) ->
+    [{default_type, "text/richtext"}, {mime_type, "text/html"}] ++ basic_conf() ++ server_config(http, Config);
 server_config(http_mime_types, Config0) ->
     Config1 = basic_conf() ++  server_config(http, Config0),
     ServerRoot = proplists:get_value(server_root, Config0),
@@ -2144,7 +2254,9 @@ server_config(https, Config) ->
     ServerConf = proplists:get_value(server_config, SSLConf),
     [{socket_type, {ssl,
 		    [{nodelay, true} | ServerConf]}}]
-        ++ proplists:delete(socket_type, server_config(http, Config)).
+        ++ proplists:delete(socket_type, server_config(http, Config));
+server_config(esi, Config) ->
+    basic_conf() ++ server_config(http, Config).
 
 config_template(Config, ServerRoot, ScriptPath, Modules) ->
     [{port, 0},
@@ -2160,11 +2272,20 @@ config_template(Config, ServerRoot, ScriptPath, Modules) ->
      {mime_types, [{"html","text/html"},{"htm","text/html"}, {"shtml","text/html"},
 		   {"gif", "image/gif"}]},
      {alias, {"/icons/", filename:join(ServerRoot,"icons") ++ "/"}},
-     {alias, {"/pics/",  filename:join(ServerRoot,"icons") ++ "/"}},
-     {script_alias, {"/cgi-bin/", ScriptPath}},
+     {re_write, {"/pic(ture)?s/",  filename:join(ServerRoot,"icons") ++ "/"}},
      {script_alias, {"/htbin/", ScriptPath}},
+     {script_alias, {"/cgi-bin/", ScriptPath}},
+     {script_re_write, {"/cgi-([a-zA-Z-]*)bin/", ScriptPath}},
      {erl_script_alias, {"/cgi-bin/erl", Modules}}
-    ].
+    ] ++ custom_config_options(Config).
+
+custom_config_options([{Name, _} = Option | Rest]) when Name == erl_script_alias;
+                                                        Name == erl_script_timeout ->
+    [Option | custom_config_options(Rest)];
+custom_config_options([_ | Rest]) ->
+    custom_config_options(Rest);
+custom_config_options([]) ->
+    [].
 
 init_httpd(Group, Config0) ->
     Config1 = proplists:delete(port, Config0),
@@ -2644,3 +2765,56 @@ peer(Config) ->
       _ ->
         "false"
    end.   
+
+start_log_watcher() ->
+    Spawner = self(),
+    EventDest = erlang:alias(),
+    HandlerId = ?MODULE,
+    _ =
+        spawn(
+          fun () ->
+                  MonAlias =
+                      monitor(process, Spawner, [{alias,reply_demonitor}]),
+                  EventDest ! {started,EventDest,MonAlias},
+                  receive
+                      {stop,MonAlias} ->
+                          _ = logger:remove_handler(HandlerId),
+                          EventDest ! {stopped,EventDest},
+                          ok;
+                      {'DOWN',MonAlias,_,_,_} ->
+                          _ = logger:remove_handler(HandlerId),
+                          ok
+                  end
+          end),
+    receive
+        {started,EventDest,Watcher} ->
+            Config = #{ config => EventDest },
+            ok = logger:add_handler(HandlerId, ?MODULE, Config),
+            {EventDest,Watcher}
+    end.
+
+stop_log_watcher({EventDest,Watcher}) ->
+    Watcher ! {stop,Watcher},
+    receive
+        {stopped,EventDest} ->
+            true = unalias(EventDest),
+            stop_log_watcher_collect(EventDest)
+    end.
+%%
+stop_log_watcher_collect(EventDest) ->
+    receive
+        {event,EventDest,Event} ->
+            [Event | stop_log_watcher_collect(EventDest)]
+    after 0 ->
+            []
+    end.
+
+log(#{level := Level} = Event, #{ config := EventDest }) ->
+    %% Pass on events of level 'error' or worse
+    case logger:compare_levels(Level, error) of
+        lt ->
+            ok;
+        _ ->
+            EventDest ! {event,EventDest,Event},
+            ok
+    end.

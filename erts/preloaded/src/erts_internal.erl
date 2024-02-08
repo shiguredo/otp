@@ -117,7 +117,11 @@
 
 -export([no_aux_work_threads/0]).
 
+-export([binary_to_integer/2, list_to_integer/2]).
+
 -export([dynamic_node_name/0, dynamic_node_name/1]).
+
+-export([term_to_string/1, term_to_string/2]).
 
 %%
 %% Await result of send to port
@@ -975,25 +979,30 @@ dist_spawn_request(_Node, _MFA, _Opts, _Type) ->
 
 dist_spawn_init(MFA) ->
     %%
-    %% The argument list is passed as a message
-    %% to the newly created process. This since
-    %% it might be large and require a substantial
-    %% amount of work to decode. This way we put
-    %% this work on the newly created process
-    %% (which can execute in parallel with all
-    %% other tasks) instead of on the distribution
-    %% channel code which is a bottleneck in the
-    %% system.
-    %% 
-    %% erl_create_process() ensures that the
-    %% argument list to use in apply is
-    %% guaranteed to be the first message in the
-    %% message queue.
+    %% The argument list is passed as a message to the newly created process.
+    %% This since it might be large and require a substantial amount of work
+    %% to decode. This way we put this work on the newly created process
+    %% (which can execute in parallel with all other tasks) instead of on the
+    %% distribution channel code which is a bottleneck in the system.
+    %%
+    %% erl_create_process() adds two messages to the message queue. These two
+    %% messages are guaranteed to be first in the message queue. First the
+    %% argument list to use followed by a 'dist_spawn_init' message. The
+    %% 'dist_spawn_init' message makes it possible to detect decode failures
+    %% of the argument list.
     %%
     {M, F, _NoA} = MFA,
     receive
-        A ->
-            erlang:apply(M, F, A)
+        A when A =/= dist_spawn_init ->
+            receive dist_spawn_init -> ok end,
+            erlang:apply(M, F, A);
+        dist_spawn_init ->
+            %% Missing argument list due to faulty encoding of the argument
+            %% list. The failed decode operation of the argument list caused
+            %% the message to be removed from the message queue and also
+            %% scheduled a take down of the connection. We, however, need to
+            % ensure that this process is terminated...
+            exit(argument_list_decode_failure)
     end.
 
 %%
@@ -1037,6 +1046,23 @@ beamfile_module_md5(_Bin) ->
 no_aux_work_threads() ->
     erlang:nif_error(undefined).
 
+%% Helper BIF for binary_to_integer/{1,2}.
+
+-spec binary_to_integer(Bin, Base) -> integer() | big | 'badarg' when
+      Bin :: binary(),
+      Base :: 2..36.
+binary_to_integer(_Bin, _Base) ->
+    erlang:nif_error(undefined).
+
+%% Helper BIF for list_to_integer/{1,2}.
+
+-spec list_to_integer(List, Base) ->
+          {integer(),list()} | 'big' | 'badarg' | 'no_integer' | 'not_a_list' when
+      List :: [any()],
+      Base :: 2..36.
+list_to_integer(_List, _Base) ->
+    erlang:nif_error(undefined).
+
 %%
 %% Is dynamic node name enabled?
 %%
@@ -1060,3 +1086,15 @@ dynamic_node_name(false) ->
         false -> ok;
         _ -> _ = persistent_term:erase({?MODULE, dynamic_node_name}), ok
     end.
+
+-spec term_to_string(T :: term()) -> string().
+
+term_to_string(T) ->
+    term_to_string(T, undefined).
+
+-spec term_to_string(T, Limit) -> string() when
+    T :: term(),
+    Limit :: undefined | pos_integer().
+
+term_to_string(_T, _Limit) ->
+    erlang:nif_error(undefined).

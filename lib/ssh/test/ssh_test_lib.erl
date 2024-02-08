@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -121,7 +121,11 @@ setup_host_key_create_dir/3,
 setup_host_key/3,
 setup_known_host/3,
 get_addr_str/0,
-file_base_name/2
+file_base_name/2,
+add_report_handler/0,
+get_reports/1,
+kex_strict_negotiated/2,
+event_logged/3
         ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -484,7 +488,7 @@ receive_exec_result(Msgs) when is_list(Msgs) ->
                             receive_exec_result(Msgs);
                         Other ->
                             ct:log("~p:~p unexpected Other ~p", [?MODULE,?FUNCTION_NAME,Other]),
-                            {unexpected_msg, Other}
+                            receive_exec_result(Msgs)
                     end
             end
     after 
@@ -1267,3 +1271,49 @@ file_base_name(system_src, 'ecdsa-sha2-nistp521') -> "ssh_host_ecdsa_key521";
 file_base_name(system_src, Alg) -> file_base_name(system, Alg).
 
 %%%----------------------------------------------------------------
+add_report_handler() ->
+    ssh_eqc_event_handler:add_report_handler().
+
+get_reports(Pid) ->
+    ssh_eqc_event_handler:get_reports(Pid).
+
+-define(SEARCH_FUN(EXP),
+        begin
+            fun({info_report, _, {_, std_info, EXP}}) ->
+                    true;
+               (_) ->
+                    false
+            end
+        end).
+-define(SEARCH_SUFFIX, " will use strict KEX ordering").
+
+kex_strict_negotiated(client, Reports) ->
+    kex_strict_negotiated(?SEARCH_FUN("client" ++ ?SEARCH_SUFFIX), Reports);
+kex_strict_negotiated(server, Reports) ->
+    kex_strict_negotiated(?SEARCH_FUN("server" ++ ?SEARCH_SUFFIX), Reports);
+kex_strict_negotiated(SearchFun, Reports) when is_function(SearchFun) ->
+    case lists:search(SearchFun, Reports) of
+        {value, _} -> true;
+        _ -> false
+    end.
+
+event_logged(Role, Reports, Reason) ->
+    SearchF =
+        fun({info_msg, _, {_, _Format, Args}}) ->
+                AnyF = fun (E) when is_list(E) ->
+                               case string:find(E, Reason) of
+                                   nomatch -> false;
+                                   _ -> true
+                               end;
+                           (_) ->
+                               false
+                       end,
+                lists:member(Role, Args) andalso
+                    lists:any(AnyF, Args);
+           (_) ->
+                false
+        end,
+    case lists:search(SearchF, Reports) of
+        {value, _} -> true;
+        _ -> false
+    end.

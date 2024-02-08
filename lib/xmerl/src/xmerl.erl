@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2003-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2023. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ export(Content, Callback) ->
 %%	<li><code>#xmlComment{}</code></li>
 %%	<li><code>#xmlDecl{}</code></li>
 %% </ul>
-%% <p>(See <tt>xmerl.hrl</tt> for the record definitions.)
+%% <p>(See <code>xmerl.hrl</code> for the record definitions.)
 %% Text in <code>#xmlText{}</code> elements can be deep lists of
 %% characters and/or binaries.</p>
 %%

@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>1999</year><year>2022</year>
+      <year>1999</year><year>2023</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -30,6 +30,72 @@
     <file>notes.xml</file>
   </header>
   <p>This document describes the changes made to the Crypto application.</p>
+
+<section><title>Crypto 5.4</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fixed some benign compile warnings on Windows.</p>
+          <p>
+	    Own Id: OTP-18895</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Enable engine support for OpenSSL versions 3.</p>
+          <p>
+	    Own Id: OTP-18832 Aux Id: PR-7763 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Crypto 5.3</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix VM crash caused by <c>crypto being</c> purged and
+	    reloaded (by init:restart for example) on OS with musl
+	    libc (such as Alpine linux).</p>
+          <p>
+	    Own Id: OTP-18670 Aux Id: GH-7436, PR-7450 </p>
+        </item>
+        <item>
+          <p>
+	    Improved understanding of LibreSSL versions. Support
+	    chacha20 and chacha20_poly1305 for LibreSSL 3.7. Reflect
+	    removal of support for the DSS/DSA algorithm which was
+	    done in LibreSSL 2.6.1.</p>
+          <p>
+	    Own Id: OTP-18758 Aux Id: PR-7209 </p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    FIPS supported by <c>crypto</c> for OpenSSL 3.0.* and
+	    3.1.*.</p>
+          <p>
+	    Own Id: OTP-18666 Aux Id: PR-7392 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
 
 <section><title>Crypto 5.2</title>
 
@@ -96,6 +162,23 @@
 	    </p>
           <p>
 	    Own Id: OTP-18447</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Crypto 5.1.4.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix VM crash caused by <c>crypto being</c> purged and
+	    reloaded (by init:restart for example) on OS with musl
+	    libc (such as Alpine linux).</p>
+          <p>
+	    Own Id: OTP-18670 Aux Id: GH-7436, PR-7450 </p>
         </item>
       </list>
     </section>
@@ -422,6 +505,23 @@
           <p>
 	    Own Id: OTP-18086 Aux Id: OTP-16282, OTP-16643,
 	    OTP-16644, OTP-17701, OTP-17702, OTP-17704 </p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>Crypto 5.0.6.4</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix VM crash caused by <c>crypto being</c> purged and
+	    reloaded (by init:restart for example) on OS with musl
+	    libc (such as Alpine linux).</p>
+          <p>
+	    Own Id: OTP-18670 Aux Id: GH-7436, PR-7450 </p>
         </item>
       </list>
     </section>

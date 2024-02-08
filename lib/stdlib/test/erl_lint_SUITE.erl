@@ -82,7 +82,9 @@
          unused_type2/1,
          eep49/1,
          redefined_builtin_type/1,
-         tilde_k/1]).
+         tilde_k/1,
+         match_float_zero/1,
+         undefined_module/1]).
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
@@ -113,7 +115,9 @@ all() ->
      eep49,
      redefined_builtin_type,
      tilde_k,
-     singleton_type_var_errors].
+     singleton_type_var_errors,
+     match_float_zero,
+     undefined_module].
 
 groups() -> 
     [{unused_vars_warn, [],
@@ -5180,6 +5184,45 @@ tilde_k(Config) ->
           }
          ],
     [] = run(Config, Ts),
+
+    ok.
+
+match_float_zero(Config) ->
+    Ts = [{float_zero_1,
+           <<"t(+0.0) -> ok.\n"
+             "k(-0.0) -> ok.\n">>,
+           [],
+           []},
+          {float_zero_2,
+           <<"t(0.0) -> ok.\n"
+             "k({0.0}) -> ok.\n">>,
+           [],
+           {warnings,[{{1,23},erl_lint,match_float_zero},
+                      {{2,4},erl_lint,match_float_zero}]}},
+          {float_zero_3,
+           <<"t(A) when A =:= 0.0 -> ok;\n" %% Should warn.
+             "t(A) when A =:= {0.0} -> ok.\n" %% Should warn.
+             "k(A) -> A =:= 0.0.\n" %% Should warn.
+             "q(A) -> A =:= {0.0}.\n" %% Should warn.
+             "z(A) when A =:= +0.0 -> ok;\n" %% Should not warn.
+             "z(A) when A =:= {+0.0} -> ok.\n">>, %% Should not warn.
+           [],
+           {warnings,[{{1,37},erl_lint,match_float_zero},
+                      {{2,18},erl_lint,match_float_zero},
+                      {{3,15},erl_lint,match_float_zero},
+                      {{4,16},erl_lint,match_float_zero}]}}
+         ],
+    [] = run(Config, Ts),
+
+    ok.
+
+%% GH-7655. When the module definition was missing, spurious
+%% diagnostics would be emitted for each spec.
+undefined_module(Config) ->
+    Code = <<"-spec foo() -> 'ok'.
+              foo() -> ok.
+             ">>,
+    {errors,[{{1,2},erl_lint,undefined_module}],[]} = run_test2(Config, Code, []),
 
     ok.
 

@@ -141,7 +141,10 @@
               srp_param_type/0,
               named_curve/0,
               sign_scheme/0,
-              group/0]).
+              signature_algs/0,
+              group/0,
+              connection_info/0
+             ]).
 
 %% -------------------------------------------------------------------------------------------------------
 
@@ -879,7 +882,7 @@ send(#sslsocket{pid = {ListenSocket, #config{transport_info = Info}}}, Data) ->
 %%--------------------------------------------------------------------
 -spec recv(SslSocket, Length) -> {ok, Data} | {error, reason()} when
       SslSocket :: sslsocket(),
-      Length :: integer(),
+      Length :: non_neg_integer(),
       Data :: binary() | list() | HttpPacket,
       HttpPacket :: any().
 
@@ -888,13 +891,15 @@ recv(Socket, Length) ->
 
 -spec recv(SslSocket, Length, Timeout) -> {ok, Data} | {error, reason()} when
       SslSocket :: sslsocket(),
-      Length :: integer(),
+      Length :: non_neg_integer(),
       Data :: binary() | list() | HttpPacket,
       Timeout :: timeout(),
       HttpPacket :: any().
 
-recv(#sslsocket{pid = [Pid|_]}, Length, Timeout) when is_pid(Pid),
-						  (is_integer(Timeout) andalso Timeout >= 0) or (Timeout == infinity)->
+recv(#sslsocket{pid = [Pid|_]}, Length, Timeout)
+  when is_pid(Pid) andalso
+       (is_integer(Length) andalso Length >= 0) andalso
+       ((is_integer(Timeout) andalso Timeout >= 0) orelse Timeout == infinity) ->
     ssl_gen_statem:recv(Pid, Length, Timeout);
 recv(#sslsocket{pid = {dtls,_}}, _, _) ->
     {error,enotconn};
@@ -999,7 +1004,7 @@ peercert(#sslsocket{pid = {_Listen, #config{}}}) ->
 -spec negotiated_protocol(SslSocket) -> {ok, Protocol} | {error, Reason} when
       SslSocket :: sslsocket(),
       Protocol :: binary(),
-      Reason :: protocol_not_negotiated.
+      Reason :: protocol_not_negotiated | closed.
 %%
 %% Description: Returns the protocol that has been negotiated. If no
 %% protocol has been negotiated will return {error, protocol_not_negotiated}
@@ -1106,7 +1111,7 @@ append_cipher_suites(Filters, Suites) ->
     (Suites -- Deferred) ++  Deferred.
 
 %%--------------------------------------------------------------------
--spec signature_algs(Description, Version) -> [signature_algs()] when
+-spec signature_algs(Description, Version) -> signature_algs() when
       Description :: default | all | exclusive,
       Version :: protocol_version().
 
@@ -1136,9 +1141,9 @@ signature_algs(Description, 'dtlsv1.2') ->
 signature_algs(Description, Version) when Description == default;
                                           Description == all;
                                           Description == exclusive->
-    {error, {signature_algs_not_supported_in_protocol_version, Version}};
-signature_algs(Description,_) ->
-    {error, {badarg, Description}}.
+    erlang:error({signature_algs_not_supported_in_protocol_version, Version});
+signature_algs(Description, Version) ->
+    erlang:error(badarg, [Description, Version]).
 
 %%--------------------------------------------------------------------
 -spec eccs() -> NamedCurves when
@@ -1322,8 +1327,21 @@ getstat(#sslsocket{pid = [Pid|_], fd = {Transport, Socket, _}},
 %%
 %% Description: Same as gen_tcp:shutdown/2
 %%--------------------------------------------------------------------
-shutdown(#sslsocket{pid = {dtls, #config{}}},_) ->
-    {error, enotconn};
+shutdown(#sslsocket{pid = {dtls, #config{transport_info = Info}}}, _) ->
+    Transport = element(1, Info),
+    %% enotconn is what gen_tcp:shutdown on a listen socket will result with.
+    %% shutdown really is handling TCP functionality not present
+    %% with gen_udp or gen_sctp, but if a callback wrapper is supplied let
+    %% the error be the same as for gen_tcp as a wrapper could have
+    %% supplied it own logic and this is backwards compatible.
+    case Transport of
+        gen_udp ->
+            {error, notsup};
+        gen_sctp ->
+            {error, notsup};
+        _  ->
+            {error, enotconn}
+    end;
 shutdown(#sslsocket{pid = {Listen, #config{transport_info = Info}}}, How) ->
     Transport = element(1, Info),
     Transport:shutdown(Listen, How);    

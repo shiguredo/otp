@@ -116,7 +116,7 @@ struct erl_node_; /* Declared in erl_node_tables.h */
  *
  * - The tag is zero for arityval and non-zero for thing headers.
  * - A single bit differentiates between positive and negative bignums.
- * - If more tags are needed, the REF and and EXTERNAL_REF tags could probably
+ * - If more tags are needed, the REF and EXTERNAL_REF tags could probably
  *   be combined to one tag.
  *
  * XXX: globally replace XXX_SUBTAG with TAG_HEADER_XXX
@@ -409,7 +409,12 @@ _ET_DECLARE_CHECKED(Eterm,bignum_header_neg,Eterm)
 #define _unchecked_bignum_header_arity(x)	_unchecked_header_arity((x))
 _ET_DECLARE_CHECKED(Uint,bignum_header_arity,Eterm)
 #define bignum_header_arity(x)	_ET_APPLY(bignum_header_arity,(x))
-#define BIG_ARITY_MAX		((1 << 19)-1)
+
+#if defined(ARCH_64)
+#  define BIG_ARITY_MAX		((1 << 16)-1)
+#else
+#  define BIG_ARITY_MAX		((1 << 17)-1)
+#endif
 #define make_big(x)	make_boxed((x))
 #define is_big(x)	(is_boxed((x)) && _is_bignum_header(*boxed_val((x))))
 #define is_not_big(x)	(!is_big((x)))
@@ -954,12 +959,12 @@ typedef union {
 
 #define is_ordinary_ref_thing(x)                                        \
     ((*((Eterm *)(x)) == ERTS_REF_THING_HEADER)                         \
-     & (((ErtsRefThing *) (x))->o.marker == ERTS_ORDINARY_REF_MARKER))
+     && (((ErtsRefThing *) (x))->o.marker == ERTS_ORDINARY_REF_MARKER))
 
 /* the _with_hdr variant usable when header word may be broken (copy_shared) */
 #define is_magic_ref_thing_with_hdr(PTR,HDR)                            \
     (((HDR) == ERTS_REF_THING_HEADER)                                   \
-     & (((ErtsRefThing *) (PTR))->o.marker != ERTS_ORDINARY_REF_MARKER))
+     && (((ErtsRefThing *) (PTR))->o.marker != ERTS_ORDINARY_REF_MARKER))
 
 #else /* Ordinary and magic references of different sizes... */
 

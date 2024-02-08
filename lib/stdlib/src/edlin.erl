@@ -22,40 +22,44 @@
 %% A simple Emacs-like line editor.
 %% About Latin-1 characters: see the beginning of erl_scan.erl.
 
--export([init/0,init/1,start/1,start/2,edit_line/2,prefix_arg/1]).
+-export([init/0,init/1,start/1,start/2,edit_line/2]).
 -export([erase_line/0,erase_inp/1,redraw_line/1]).
 -export([length_before/1,length_after/1,prompt/1]).
 -export([current_line/1, current_chars/1]).
 
 -export([edit_line1/2]).
-
+-export([inverted_space_prompt/1]).
+-export([keymap/0]).
 -import(lists, [reverse/1, reverse/2]).
 
 -export([over_word/3]).
 
+-type keymap() :: #{atom() => #{string()|default => atom()}}.
 
 %% A Continuation has the structure:
-%%	{line,Prompt,CurrentLine,EditPrefix}
+%%	{line,Prompt,{LinesBefore,{ColumnsBefore, ColumnsAfter},LinesAfter},{ShellMode, EscapePrefix}}
 
 %% init()
 %%  Initialise the line editor. This must be done once per process using
 %%  the editor.
 
 init() ->
+    put(key_map, edlin_key:get_key_map()),
     put(kill_buffer, []).
 
 init(Pid) ->
+    init(),
     %% copy the kill_buffer from the process Pid
     CopiedKillBuf =
-	case erlang:process_info(Pid, dictionary) of
-	    {dictionary,Dict} ->
-		case proplists:get_value(kill_buffer, Dict) of
-		    undefined -> [];
-		    Buf       -> Buf
-		end;
-	    undefined ->
-		[]
-	end,
+        case erlang:process_info(Pid, dictionary) of
+	        {dictionary,Dict} ->
+		            case proplists:get_value(kill_buffer, Dict) of
+		                    undefined -> [];
+		                    Buf       -> Buf
+		            end;
+	        undefined ->
+		            []
+	    end,
     put(kill_buffer, CopiedKillBuf).
 
 %% start(Prompt)
@@ -64,259 +68,154 @@ init(Pid) ->
 %%	{done,Line,Rest,Requests}
 %%	{more_chars,Cont,Requests}
 %%	{blink,Cont,Requests}
-%%	{undefined,Char,Rest,Cont,Requests}
 
 start(Pbs) ->
-    start(Pbs, none).
+    start(Pbs, {normal,none}).
 
 %% Only two modes used: 'none' and 'search'. Other modes can be
 %% handled inline through specific character handling.
-start(Pbs, {_,{_,_},_}=Cont) ->
-    Rs1 = erase_line(),
-    Rs2 = redraw(Pbs, Cont, Rs1),
-    Rs3 = reverse(Rs2),
-    {more_chars,{line,Pbs,Cont,none},Rs3};
+start(Pbs, {_,{_,[]},[]}=Cont) ->
+    %% Skip redraw if the cursor is at the end.
+    {more_chars,{line,Pbs,Cont,{normal,none}},[{insert_chars,unicode,multi_line_prompt(Pbs)}]};
 
-start(Pbs, Mode) ->
-    {more_chars,{line,Pbs,{[],{[],[]},[]},Mode},[new_prompt, {put_chars,unicode,Pbs}]}.
+start(Pbs, {_,{_,_},_}=Cont) ->
+    {more_chars,{line,Pbs,Cont,{normal,none}},redraw(Pbs, Cont, [])};
+
+start(Pbs, EditState) ->
+    {more_chars,{line,Pbs,{[],{[],[]},[]},EditState},[new_prompt, {insert_chars,unicode,Pbs}]}.
+
+-spec keymap() -> keymap().
+keymap() ->
+    get(key_map).
 
 edit_line(Cs, {line,P,L,{blink,N_Rs}}) ->
-    edit(Cs, P, L, none, N_Rs);
+    edit(Cs, P, L, {normal, none}, N_Rs);
 edit_line(Cs, {line,P,L,M}) ->
     edit(Cs, P, L, M, []).
 
 edit_line1(Cs, {line,P,L,{blink,N_Rs}}) ->
-    edit(Cs, P, L, none, N_Rs);
-edit_line1(Cs, {line,P,{B,{[],[]},A},none}) ->
+    edit(Cs, P, L, {normal, none}, N_Rs);
+edit_line1(Cs, {line,P,{B,{[],[]},A},{normal,none}}) ->
     [CurrentLine|Lines] = [string:to_graphemes(Line) || Line <- reverse(string:split(Cs, "\n",all))],
     Cont = {Lines ++ B,{reverse(CurrentLine),[]},A},
-    Rs = reverse(redraw(P, Cont, [])),
-    %erlang:display({P, Cont, Cs, CurrentLine}),
-    {more_chars, {line,P,Cont,none},[delete_line|Rs]};
+    Rs = redraw(P, Cont, []),
+    {more_chars, {line,P,Cont,{normal,none}},[delete_line|Rs]};
 edit_line1(Cs, {line,P,L,M}) ->
     edit(Cs, P, L, M, []).
 
 edit([C|Cs], P, Line, {blink,_}, [_|Rs]) ->	%Remove blink here
-    edit([C|Cs], P, Line, none, Rs);
-edit([C|Cs], P, {LB, {Bef,Aft}, LA}=MultiLine, Prefix, Rs0) ->
-    case key_map(C, Prefix) of
-        meta ->
-            edit(Cs, P, MultiLine, meta, Rs0);
-        meta_o ->
-            edit(Cs, P, MultiLine, meta_o, Rs0);
-        meta_csi ->
-            edit(Cs, P, MultiLine, meta_csi, Rs0);
-        meta_meta ->
-            edit(Cs, P, MultiLine, meta_meta, Rs0);
-        {csi, _} = Csi ->
-            edit(Cs, P, MultiLine, Csi, Rs0);
-        meta_left_sq_bracket ->
-            edit(Cs, P, MultiLine, meta_left_sq_bracket, Rs0);
-        search_meta ->
-            edit(Cs, P, MultiLine, search_meta, Rs0);
-        search_meta_left_sq_bracket ->
-            edit(Cs, P, MultiLine, search_meta_left_sq_bracket, Rs0);
-        ctlx ->
-            edit(Cs, P, MultiLine, ctlx, Rs0);
-        new_line ->
-            case Bef of
-                [] -> edit(Cs, P, MultiLine, none, Rs0);
-                _ -> MultiLine1 = {[lists:reverse(Bef)|LB],{[],Aft},LA},
-                    edit(Cs, P, MultiLine1, none, redraw(P, MultiLine1, Rs0))
-                end;
-        new_line_finish ->
-            [Last|LAR]=LA1 = lists:reverse([lists:reverse(Bef,Aft)|LA]),
-            MultiLine1 = {LA1 ++ LB,{[],[]},[]},
-            % Move to end and redraw
-            Rs1 = redraw(P, {LAR ++ LB, {lists:reverse(Last), []},[]}, Rs0),
-            {done, MultiLine1, Cs, reverse(Rs1, [{insert_chars, unicode, "\n"}])};
-        redraw_line ->
-            Rs1 = erase_line(Rs0),
-            Rs = redraw(P, MultiLine, Rs1),
-            edit(Cs, P, MultiLine, none, Rs);
-        clear ->
-            Rs = redraw(P, MultiLine, [clear|Rs0]),
-            edit(Cs, P, MultiLine, none, Rs);
-        tab_expand ->
-            {expand, chars_before(MultiLine), Cs,
-            {line, P, MultiLine, tab_expand},
-            reverse(Rs0)};
-        tab_expand_full ->
-            {expand_full, chars_before(MultiLine), Cs,
-	        {line, P, MultiLine, tab_expand},
-	        reverse(Rs0)};
-        {undefined,C} ->
-            {undefined,{none,Prefix,C},Cs,{line,P,MultiLine,none},
-            reverse(Rs0)};
-        Op ->
-            case do_op(Op, MultiLine, Rs0) of
-                {blink,N,MultiLine1,Rs} ->
-                    edit(Cs, P, MultiLine1, {blink,N}, Rs);
-                {redraw, MultiLine1, Rs} ->
-                    edit(Cs, P, MultiLine1, none, redraw(P, MultiLine1, Rs));
-                {MultiLine1, Rs, Mode} -> % allow custom modes from do_op
-                    edit(Cs, P, MultiLine1, Mode, Rs);
-                {MultiLine1,Rs} ->
-                    edit(Cs, P, MultiLine1, none, Rs)
-            end
-    end;
+    edit([C|Cs], P, Line, {normal,none}, Rs);
 edit([], P, L, {blink,N}, Rs) ->
     {blink,{line,P,L, {blink,N}},reverse(Rs)};
-edit([], P, L, Prefix, Rs) ->
-    {more_chars,{line,P,L,Prefix},reverse(Rs)};
+edit([], P, L, EditState, Rs) ->
+    {more_chars,{line,P,L,EditState},reverse(Rs)};
 edit(eof, _, {_,{Bef,Aft0},LA} = L, _, Rs) ->
     Aft1 = case LA of
         [Last|_] -> Last;
         _ -> Aft0
     end,
-    {done,L,[],reverse(Rs, [{move_combo,-cp_len(Bef), length(LA), cp_len(Aft1)}])}.
-
-%% %% Assumes that arg is a string
-%% %% Horizontal whitespace only.
-%% whitespace_only([]) ->
-%%     true;
-%% whitespace_only([C|Rest]) ->
-%%     case C of
-%% 	$\s ->
-%% 	    whitespace_only(Rest);
-%% 	$\t ->
-%% 	    whitespace_only(Rest);
-%% 	_ ->
-%% 	    false
-%%     end.
-
-%% prefix_arg(Argument)
-%%  Take a prefix argument and return its numeric value.
-
-prefix_arg(none) -> 1;
-prefix_arg({ctlu,N}) -> N;
-prefix_arg(N) -> N.
-
-%% key_map(Char, Prefix)
-%%  Map a character and a prefix to an action.
-
-key_map(A, _) when is_atom(A) -> A;             % so we can push keywords
-key_map($\^A, none) -> beginning_of_line;
-key_map($\^B, none) -> backward_char;
-key_map($\^D, none) -> forward_delete_char;
-key_map($\^E, none) -> end_of_line;
-key_map($\^F, none) -> forward_char;
-key_map($\^H, none) -> backward_delete_char;
-key_map($\t, none) -> tab_expand;
-key_map($\t, tab_expand) -> tab_expand_full;
-key_map(C, tab_expand) -> key_map(C, none);
-key_map($\^K, none) -> kill_line;
-key_map($\^L, none) -> clear;
-key_map($\n, none) -> new_line_finish;
-key_map($\r, none) -> new_line_finish;
-key_map($\^T, none) -> transpose_char;
-key_map($\^U, none) -> ctlu;
-key_map($\^], none) -> auto_blink;
-key_map($\^X, none) -> ctlx;
-key_map($\^Y, none) -> yank;
-key_map($\^W, none) -> backward_kill_word;
-key_map($\e, none) -> meta;
-key_map($), Prefix) when Prefix =/= meta,
-                         Prefix =/= search,
-                         Prefix =/= search_meta -> {blink,$),$(};
-key_map($}, Prefix) when Prefix =/= meta,
-                         Prefix =/= search,
-                         Prefix =/= search_meta -> {blink,$},${};
-key_map($], Prefix) when Prefix =/= meta,
-                         Prefix =/= search,
-                         Prefix =/= search_meta -> {blink,$],$[};
-key_map($B, meta) -> backward_word;
-key_map($D, meta) -> kill_word;
-key_map($F, meta) -> forward_word;
-key_map($L, meta) -> redraw_line;
-key_map($T, meta) -> transpose_word;
-key_map($Y, meta) -> yank_pop;
-key_map($b, meta) -> backward_word;
-key_map($c, meta) -> clear_line;
-key_map($d, meta) -> kill_word;
-key_map($f, meta) -> forward_word;
-key_map($l, meta) -> redraw_line;
-key_map($t, meta) -> transpose_word;
-key_map($y, meta) -> yank_pop;
-key_map($<, meta) -> beginning_of_expression;
-key_map($>, meta) -> end_of_expression;
-key_map($\n, meta) -> new_line;
-key_map($\r, meta) -> new_line;
-key_map($O, meta) -> meta_o;
-key_map($H, meta_o) -> beginning_of_line;
-key_map($F, meta_o) -> end_of_line;
-key_map($\177, none) -> backward_delete_char;
-key_map($\177, meta) -> backward_kill_word;
-key_map($[, meta) -> meta_left_sq_bracket;
-key_map($H, meta_left_sq_bracket) -> beginning_of_line;
-key_map($F, meta_left_sq_bracket) -> end_of_line;
-key_map($D, meta_left_sq_bracket) -> backward_char;
-key_map($C, meta_left_sq_bracket) -> forward_char;
-% support a few <CTRL/ALT>+<CURSOR> combinations...
-%  - forward:  \e\e[C, \e[5C, \e[1;5C
-%  - backward: \e\e[D, \e[5D, \e[1;5D
-key_map($\e, meta) -> meta_meta;
-key_map($[, meta_meta) -> meta_csi;
-key_map($C, meta_csi) -> forward_word;
-key_map($D, meta_csi) -> backward_word;
-key_map($1, meta_left_sq_bracket) -> {csi, "1"};
-key_map($3, meta_left_sq_bracket) -> {csi, "3"};
-key_map($C, {csi, "3"}) -> forward_word;
-key_map($D, {csi, "3"})  -> backward_word;
-key_map($~, {csi, "3"}) -> forward_delete_char;
-key_map($5, meta_left_sq_bracket) -> {csi, "5"};
-key_map($C, {csi, "5"}) -> forward_word;
-key_map($D, {csi, "5"})  -> backward_word;
-key_map($;, {csi, "1"}) -> {csi, "1;"};
-key_map($3, {csi, "1;"}) -> {csi, "1;3"};
-key_map($C, {csi, "1;3"}) -> forward_word;
-key_map($D, {csi, "1;3"}) -> backward_word;
-key_map($A, {csi, "1;3"}) -> backward_line;
-key_map($B, {csi, "1;3"}) -> forward_line;
-key_map($4, {csi, "1;"}) -> {csi, "1;4"};
-key_map($A, {csi, "1;4"}) -> beginning_of_expression;
-key_map($B, {csi, "1;4"}) -> end_of_expression;
-key_map($5, {csi, "1;"}) -> {csi, "1;5"};
-key_map($C, {csi, "1;5"}) -> forward_word;
-key_map($D, {csi, "1;5"}) -> backward_word;
-key_map($A, {csi, "1;5"}) -> backward_line;
-key_map($B, {csi, "1;5"}) -> forward_line;
-
-
-
-
-
-key_map(C, none) when C >= $\s ->
-    {insert,C};
-%% for search, we need smarter line handling and so
-%% we cheat a bit on the dispatching, and allow to
-%% return a mode.
-key_map($\^H, search) -> {search, backward_delete_char};
-key_map($\177, search) -> {search, backward_delete_char};
-key_map($\^R, search) -> {search, skip_up};
-key_map($\^S, search) -> {search, skip_down};
-key_map($\n, search) -> {search, search_found};
-key_map($\r, search) -> {search, search_found};
-key_map($\^A, search) -> {search, search_quit};
-key_map($\^B, search) -> {search, search_quit};
-key_map($\^D, search) -> {search, search_quit};
-key_map($\^E, search) -> {search, search_quit};
-key_map($\^F, search) -> {search, search_quit};
-key_map($\t,  search) -> {search, search_quit};
-key_map($\^L, search) -> {search, search_quit};
-key_map($\^T, search) -> {search, search_quit};
-key_map($\^U, search) -> {search, search_quit};
-key_map($\^], search) -> {search, search_quit};
-key_map($\^X, search) -> {search, search_quit};
-key_map($\^Y, search) -> {search, search_quit};
-key_map($\e,  search) -> search_meta;
-key_map($c, search_meta) -> {search, search_cancel};
-key_map($C, search_meta) -> {search, search_cancel};
-key_map($[,  search_meta) -> search_meta_left_sq_bracket;
-key_map(_, search_meta) -> {search, search_quit};
-key_map(_C, search_meta_left_sq_bracket) -> {search, search_quit};
-key_map(C, search) -> {insert_search,C};
-key_map(C, _) -> {undefined,C}.
+    {done,L,[],reverse(Rs, [{move_combo,-cp_len(Bef), length(LA), cp_len(Aft1)}])};
+edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
+    case edlin_key:get_valid_escape_key(Buf, EscapePrefix) of
+        {escape_prefix, EscapePrefix1} ->
+            case ShellMode of
+                tab_expand -> edit(Buf, P, MultiLine, {normal, none}, Rs0);
+                _ -> edit([], P, MultiLine, {ShellMode, EscapePrefix1}, Rs0)
+            end;
+        {invalid, _I, Rest} ->
+            edit(Rest, P, MultiLine, {ShellMode, none}, Rs0);
+        {insert, C1, Cs2} ->
+            %% If its a printable character
+            %% we could in theory override it in the keymap,
+            %% but lets not for now.
+            Op = case ShellMode of
+                normal when C1 =:= $) ->
+                    {blink,$),$(};
+                normal when C1 =:= $] ->
+                    {blink,$],$[};
+                normal when C1 =:= $} ->
+                    {blink,$},${};
+                normal -> {insert, C1};
+                search when $\s =< C1 ->{insert_search, C1};
+                search -> search_quit;
+                tab_expand -> tab_expand_quit
+            end,
+            case Op of
+                tab_expand_quit ->
+                    edit(Buf, P, MultiLine, {normal,none}, Rs0);
+                search_quit ->
+                    {search_quit,Cs2,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                _ ->
+                    case do_op(Op, MultiLine, Rs0) of
+                        {blink,N,MultiLine1,Rs} ->
+                            edit(Cs2, P, MultiLine1, {blink,N}, Rs);
+                        {redraw, MultiLine1, Rs} ->
+                            edit(Cs2, P, MultiLine1, {ShellMode, none}, redraw(P, MultiLine1, Rs));
+                        {MultiLine1,Rs} ->
+                            edit(Cs2, P, MultiLine1, {ShellMode, none}, Rs)
+                    end
+            end;
+        {key, Key, Cs} ->
+            KeyMap = get(key_map),
+            Value = case maps:find(Key, maps:get(ShellMode, KeyMap)) of
+                error ->
+                    %% Default handling for shell modes
+                    case maps:find(default, maps:get(ShellMode, KeyMap)) of
+                        error -> none;
+                        {ok, Value0} -> Value0
+                    end;
+                {ok, Value0} -> Value0
+            end,
+            case Value of
+                none -> edit(Cs, P, MultiLine, {normal,none}, Rs0);
+                search -> {search,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                search_found -> {search_found,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                search_cancel -> {search_cancel,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                search_quit -> {search_quit,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                open_editor -> {open_editor,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                history_up -> {history_up,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                history_down -> {history_down,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                new_line ->
+                    MultiLine1 = {[lists:reverse(Bef)|LB],{[],Aft},LA},
+                    edit(Cs, P, MultiLine1, {normal, none}, reverse(redraw(P, MultiLine1, Rs0)));
+                new_line_finish ->
+                    % Move to end
+                    {{LB1,{Bef1,[]},[]}, Rs1} = do_op(end_of_expression, MultiLine, Rs0),
+                    {done, {[lists:reverse(Bef1)|LB1],{[],[]},[]}, Cs, reverse(Rs1, [{insert_chars, unicode, "\n"}])};
+                redraw_line ->
+                    Rs1 = erase_line(Rs0),
+                    Rs = redraw(P, MultiLine, Rs1),
+                    edit(Cs, P, MultiLine, {normal, none}, Rs);
+                clear ->
+                    Rs = redraw(P, MultiLine, [clear|Rs0]),
+                    edit(Cs, P, MultiLine, {normal, none}, Rs);
+                tab_expand ->
+                    {expand, chars_before(MultiLine), Cs,
+                     {line, P, MultiLine, {tab_expand, none}},
+                     reverse(Rs0)};
+                tab_expand_full ->
+                    {expand_full, chars_before(MultiLine), Cs,
+                     {line, P, MultiLine, {tab_expand, none}},
+                     reverse(Rs0)};
+                tab_expand_quit ->
+                    %% When exiting tab expand mode, we want to evaluate the key in normal mode
+                    edit(Buf, P, MultiLine, {normal,none}, Rs0);
+                Op ->
+                    Op1 = case ShellMode of
+                        search ->
+                            {search, Op};
+                        _ -> Op
+                    end,
+                    case do_op(Op1, MultiLine, Rs0) of
+                        {blink,N,MultiLine1,Rs} ->
+                            edit(Cs, P, MultiLine1, {blink,N}, Rs);
+                        {redraw, MultiLine1, Rs} ->
+                            edit(Cs, P, MultiLine1, {normal, none}, redraw(P, MultiLine1, Rs));
+                        {MultiLine1,Rs} ->
+                            edit(Cs, P, MultiLine1, {ShellMode, none}, Rs)
+                    end
+            end
+    end.
 
 %% do_op(Action, Before, After, Requests)
 %% Before and After are of lists of type string:grapheme_cluster()
@@ -343,14 +242,14 @@ do_op({insert,C}, {LB,{[Bef|Bef0], Aft},LA}, Rs) ->
 %% search mode), we can use the Bef and Aft variables to hold each
 %% part of the line. Bef takes charge of "(search)`$TERMS" and Aft
 %% takes charge of "': $RESULT".
-%% 
+%%
 %% Since multiline support the search mode prompt always looks like:
 %% search: $TERMS
 %%   $ResultLine1
 %%   $ResultLine2
 do_op({insert_search, C}, {LB,{Bef, []},LA}, Rs) ->
     {{LB, {[C|Bef],[]}, LA},
-     [{insert_chars, unicode, [C]}, delete_after_cursor | Rs], search};
+     [{insert_chars, unicode, [C]}, delete_after_cursor | Rs]};
 do_op({insert_search, C}, {LB,{Bef, _Aft},LA}, Rs) ->
     {{LB, {[C|Bef],[]}, LA},
      [{insert_chars, unicode, [C]}, delete_after_cursor | Rs],
@@ -358,26 +257,17 @@ do_op({insert_search, C}, {LB,{Bef, _Aft},LA}, Rs) ->
 do_op({search, backward_delete_char}, {LB,{[_|Bef], Aft},LA}, Rs) ->
     Offset= cp_len(Aft)+1,
     {{LB, {Bef,Aft}, LA},
-     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs],
-     search};
+     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
 do_op({search, backward_delete_char}, {LB,{[], Aft},LA}, Rs) ->
-    {{LB, {[],Aft}, LA}, [{insert_chars, unicode, Aft}, {delete_chars,-cp_len(Aft)}|Rs], search};
+    {{LB, {[],Aft}, LA}, [{insert_chars, unicode, Aft}, {delete_chars,-cp_len(Aft)}|Rs]};
 do_op({search, skip_up}, {_,{Bef, Aft},_}, Rs) ->
     Offset= cp_len(Aft),
     {{[],{[$\^R|Bef],Aft},[]}, % we insert ^R as a flag to whoever called us
-     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs],
-     search};
+     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
 do_op({search, skip_down}, {_,{Bef, Aft},_LA}, Rs) ->
     Offset= cp_len(Aft),
     {{[],{[$\^S|Bef],Aft},[]}, % we insert ^S as a flag to whoever called us
-     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs],
-     search};
-do_op({search, search_found}, {_,{_Bef, Aft},LA}, Rs) ->
-    {{[],{[],Aft},LA}, Rs, search_found};
-do_op({search, search_quit}, {_,{_Bef, Aft},LA}, Rs) ->
-    {{[],{[],Aft},LA}, Rs, search_quit};
-do_op({search, search_cancel}, _, Rs) ->
-    {{[],{[],[]},[]}, Rs, search_cancel};
+     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
 %% do blink after $$
 do_op({blink,C,M}, {_,{[$$,$$|_], _},_} = MultiLine, Rs) ->
     blink(over_paren(chars_before(MultiLine), C, M), C, MultiLine, Rs);
@@ -398,12 +288,59 @@ do_op(backward_delete_char, {[PrevLine|LB],{[], Aft},LA}, Rs) ->
     {redraw, NewLine,Rs};
 do_op(backward_delete_char, {LB,{[GC|Bef], Aft},LA}, Rs) ->
     {{LB, {Bef,Aft}, LA},[{delete_chars,-gc_len(GC)}|Rs]};
+do_op(forward_delete_word, {LB,{Bef, []},[NextLine|LA]}, Rs) ->
+    NewLine = {LB, {Bef, NextLine}, LA},
+    {redraw, NewLine, Rs};
+do_op(forward_delete_word, {LB,{Bef, Aft0},LA}, Rs) ->
+    {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
+    {Aft,Kill,N} = over_word(Aft1, Kill0, N0),
+    put(kill_buffer, reverse(Kill)),
+    {{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
+do_op(backward_delete_word, {[PrevLine|LB],{[], Aft},LA}, Rs) ->
+    NewLine = {LB, {lists:reverse(PrevLine), Aft}, LA},
+    {redraw, NewLine,Rs};
+do_op(backward_delete_word, {LB,{Bef0, Aft},LA}, Rs) ->
+    {Bef1,Kill0,N0} = over_non_word(Bef0, [], 0),
+    {Bef,Kill,N} = over_word(Bef1, Kill0, N0),
+    put(kill_buffer, Kill),
+    {{LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
 do_op(transpose_char, {LB,{[C1,C2|Bef], []},LA}, Rs) ->
     Len = gc_len(C1)+gc_len(C2),
-    {{LB, {[C2,C1|Bef],[]}, LA},[{put_chars, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
+    {{LB, {[C2,C1|Bef],[]}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
 do_op(transpose_char, {LB,{[C2|Bef], [C1|Aft]},LA}, Rs) ->
     Len = gc_len(C2),
-    {{LB, {[C2,C1|Bef],Aft}, LA},[{put_chars, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
+    {{LB, {[C2,C1|Bef],Aft}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
+do_op(transpose_word, {LB,{Bef0, Aft0},LA}, Rs) ->
+    {Aft1,Word2A,N0} = over_word(Aft0, [], 0),
+    {Bef, TransposedWords, Aft, N} = case N0 of
+        0 -> {Aft2,NonWord,N1} = over_non_word(Aft1, [], 0),
+            case N1 of
+                0 ->
+                    {Bef1,Word2B,B0} = over_word(Bef0, [], 0),
+                    {Bef2,NonWordB,B1} = over_non_word(Bef1, [], B0),
+                    {Bef3,Word1,B2} = over_word(Bef2, [], B1),
+                    {Bef3, Word2B++NonWordB++Word1, Aft0, B2};
+                _ ->
+                    {Aft3,Word2,N2} = over_word(Aft2, [], N1),
+                    case N2 of
+                        0 ->
+                            {Bef1,Word2B,B0} = over_word(Bef0, [], 0),
+                            {Bef2,NonWordB,B1} = over_non_word(Bef1, [], B0),
+                            {Bef3,Word1,B2} = over_word(Bef2, [], B1),
+                            {Bef3, Word2B++NonWordB++Word1, Aft0, B2};
+                        _ ->
+                            {Bef1, NonWord2, B0} = over_non_word(Bef0, [], 0),
+                            {Bef2, Word1, B1} = over_word(Bef1, [], B0),
+                            {Bef2, reverse(Word2) ++NonWord2 ++ reverse(NonWord) ++Word1, Aft3, B1}
+                    end
+            end;
+        _ ->
+            {Bef1,Word2B,B0} = over_word(Bef0, [], 0),
+            {Bef2,NonWord,B1} = over_non_word(Bef1, [], B0),
+            {Bef3,Word1,B2} = over_word(Bef2, [], B1),
+            {Bef3, Word2B++reverse(Word2A)++NonWord++Word1, Aft1, B2}
+    end,
+    {{LB, {reverse(TransposedWords)++Bef, Aft}, LA},[{insert_chars_over, unicode, TransposedWords}, {move_rel, -N}|Rs]};
 do_op(kill_word, {LB,{Bef, Aft0},LA}, Rs) ->
     {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
     {Aft,Kill,N} = over_word(Aft1, Kill0, N0),
@@ -421,7 +358,7 @@ do_op(clear_line, _, Rs) ->
     {redraw, {[], {[],[]},[]}, Rs};
 do_op(yank, {LB,{Bef, []},LA}, Rs) ->
     Kill = get(kill_buffer),
-    {{LB, {reverse(Kill, Bef),[]}, LA},[{put_chars, unicode,Kill}|Rs]};
+    {{LB, {reverse(Kill, Bef),[]}, LA},[{insert_chars, unicode,Kill}|Rs]};
 do_op(yank, {LB,{Bef, Aft},LA}, Rs) ->
     Kill = get(kill_buffer),
     {{LB, {reverse(Kill, Bef),Aft}, LA},[{insert_chars, unicode,Kill}|Rs]};
@@ -468,7 +405,7 @@ do_op(end_of_expression, {LB,{Bef, []},[]}, Rs) ->
     {{LB, {Bef,[]}, []},Rs};
 do_op(end_of_expression, {LB,{Bef, Aft},LA}, Rs) ->
     [Last|Rest] = lists:reverse(LA) ++ [lists:reverse(Bef, Aft)],
-    {{LB ++ Rest, {lists:reverse(Last),[]}, []},[{move_combo, -cp_len(Bef), length(LA), cp_len(Last)}|Rs]};
+    {{Rest ++ LB, {lists:reverse(Last),[]}, []},[{move_combo, -cp_len(Bef), length(LA), cp_len(Last)}|Rs]};
 do_op(beginning_of_line, {LB,{[_|_]=Bef, Aft},LA}, Rs) ->
     {{LB, {[],reverse(Bef, Aft)}, LA},[{move_rel,-(cp_len(Bef))}|Rs]};
 do_op(beginning_of_line, {LB,{[], Aft},LA}, Rs) ->
@@ -477,7 +414,7 @@ do_op(end_of_line, {LB,{Bef, [_|_]=Aft},LA}, Rs) ->
     {{LB, {reverse(Aft, Bef),[]}, LA},[{move_rel,cp_len(Aft)}|Rs]};
 do_op(end_of_line, {LB,{Bef, []},LA}, Rs) ->
     {{LB, {Bef,[]}, LA},Rs};
-do_op(ctlu, {LB,{Bef, Aft},LA}, Rs) ->
+do_op(backward_kill_line, {LB,{Bef, Aft},LA}, Rs) ->
     put(kill_buffer, reverse(Bef)),
     {{LB, {[], Aft}, LA}, [{delete_chars, -cp_len(Bef)} | Rs]};
 do_op(beep, {LB,{Bef, Aft},LA}, Rs) ->
@@ -677,7 +614,29 @@ redraw_line({line, Pbs, L,_}) ->
     redraw(Pbs, L, []).
 
 multi_line_prompt(Pbs) ->
-    lists:duplicate(max(0,prim_tty:npwcwidthstring(Pbs)-3), $ )++".. ".
+    case application:get_env(stdlib, shell_multiline_prompt, default) of
+        default -> %% Default multiline prompt
+            default_multiline_prompt(Pbs);
+        {M,F} when is_atom(M), is_atom(F) ->
+            case catch apply(M,F,[Pbs]) of
+                Prompt when is_list(Prompt) -> Prompt;
+                _ ->
+                    application:set_env(stdlib, shell_multiline_prompt, default),
+                    io:format("Invalid call: ~p:~p/1~n", [M,F]),
+                    default_multiline_prompt(Pbs)
+            end;
+        Prompt when is_list(Prompt) ->
+            lists:duplicate(max(0,prim_tty:npwcwidthstring(Pbs) - prim_tty:npwcwidthstring(Prompt)), $\s) ++ Prompt;
+        Prompt ->
+            application:set_env(stdlib, shell_multiline_prompt, default),
+            io:format("Invalid multiline prompt: ~p~n", [Prompt]),
+            default_multiline_prompt(Pbs)
+    end.
+
+default_multiline_prompt(Pbs) ->
+    lists:duplicate(max(0,prim_tty:npwcwidthstring(Pbs) - 3), $\s) ++ ".. ".
+inverted_space_prompt(Pbs) ->
+    "\e[7m" ++ lists:duplicate(prim_tty:npwcwidthstring(Pbs) - 1, $\s) ++ "\e[27m ".
 
 redraw(Pbs, {_,{_,_},_}=L, Rs) ->
     [{redraw_prompt, Pbs, multi_line_prompt(Pbs), L} |Rs].

@@ -53,6 +53,8 @@
          process_info_self_msgq_len/1,
          process_info_self_msgq_len_messages/1,
          process_info_self_msgq_len_more/1,
+         process_info_msgq_len_no_very_long_delay/1,
+         process_info_dict_lookup/1,
 	 bump_reductions/1, low_prio/1, binary_owner/1, yield/1, yield2/1,
 	 otp_4725/1, dist_unlink_ack_exit_leak/1, bad_register/1,
          garbage_collect/1, otp_6237/1,
@@ -92,7 +94,10 @@
          spawn_against_old_node/1,
          spawn_against_new_node/1,
          spawn_request_reply_option/1,
+         dist_spawn_arg_list_mixup/1,
          alias_bif/1,
+         dist_frag_alias/1,
+         dist_frag_unaliased/1,
          monitor_alias/1,
          spawn_monitor_alias/1,
          demonitor_aliasmonitor/1,
@@ -152,7 +157,8 @@ groups() ->
        spawn_against_ei_node,
        spawn_against_old_node,
        spawn_against_new_node,
-       spawn_request_reply_option]},
+       spawn_request_reply_option,
+       dist_spawn_arg_list_mixup]},
      {processes_bif, [],
       [processes_large_tab, processes_default_tab,
        processes_small_tab, processes_this_tab,
@@ -176,7 +182,9 @@ groups() ->
        process_info_self_signal,
        process_info_self_msgq_len,
        process_info_self_msgq_len_messages,
-       process_info_self_msgq_len_more]},
+       process_info_self_msgq_len_more,
+       process_info_msgq_len_no_very_long_delay,
+       process_info_dict_lookup]},
      {otp_7738, [],
       [otp_7738_waiting, otp_7738_suspended,
        otp_7738_resume]},
@@ -187,7 +195,8 @@ groups() ->
        otp_16436, otp_16642]},
      {alias, [],
       [alias_bif, monitor_alias, spawn_monitor_alias,
-       demonitor_aliasmonitor, down_aliasmonitor]}].
+       demonitor_aliasmonitor, down_aliasmonitor,
+       dist_frag_alias, dist_frag_unaliased]}].
 
 init_per_suite(Config) ->
     A0 = case application:start(sasl) of
@@ -1258,7 +1267,8 @@ process_info_smoke_all(Config) when is_list(Config) ->
                     message_queue_data,
                     garbage_collection_info,
                     magic_ref,
-                    fullsweep_after],
+                    fullsweep_after,
+                    {dictionary, ets_ref}],
 
     {ok, Peer, Node} = ?CT_PEER(),
     RP = spawn_link(Node, fun process_info_smoke_all_tester/0),
@@ -1526,7 +1536,225 @@ pi_sig_spam_test(SpamFun, PITest, PICheckRes) ->
     after
         _ = erlang:system_flag(schedulers_online, SO)
     end.
-    
+
+process_info_msgq_len_no_very_long_delay(Config) when is_list(Config) ->
+    Tester = self(),
+    P1 = spawn_link(fun () ->
+                            receive after infinity -> ok end
+                    end),
+    {message_queue_len, 0} = process_info(self(), message_queue_len),
+    {message_queue_len, 0} = process_info(P1, message_queue_len),
+    P2 = spawn_link(fun () ->
+                            Tester ! hello,
+                            P1 ! hello,
+                            receive after infinity -> ok end
+                    end),
+    receive after 100 -> ok end,
+    {message_queue_len, 1} = process_info(self(), message_queue_len),
+    {message_queue_len, 1} = process_info(P1, message_queue_len),
+    receive hello -> ok end,
+    {message_queue_len, 0} = process_info(self(), message_queue_len),
+    unlink(P1),
+    exit(P1, kill),
+    unlink(P2),
+    exit(P2, kill),
+    false = is_process_alive(P1),
+    false = is_process_alive(P2),
+    ok.
+
+process_info_dict_lookup(Config) when is_list(Config) ->
+    Pid = spawn_link(fun proc_dict_helper/0),
+    {async_dist, AsyncDist} = process_info(Pid, async_dist),
+    Ref = make_ref(),
+    Bin = <<17:4096>>,
+    Int0 = 9999999999999999999999999999999999,
+    Int1 = 1111111111111111111111111111111111,
+    Tuple = {make_ref(), erlang:monotonic_time()},
+
+    %% Check that we can lookup dictionary values on another process...
+    pdh(Pid, put_async, [hej, hopp]),
+    pdh(Pid, put_async, [hopp, hej]),
+    pdh(Pid, put_async, [Ref, Int0]),
+    pdh(Pid, put_async, [Int0, Int1]),
+    pdh(Pid, put_async, [Pid, Ref]),
+    pdh(Pid, put_async, [Tuple, Bin]),
+    undefined = pdh(Pid, put, [Bin, Ref]),
+
+    erlang:garbage_collect(Pid),
+
+    {{dictionary, Ref}, Int0} = process_info(Pid, {dictionary, Ref}),
+    [{{dictionary, Ref}, Int0}] = process_info(Pid, [{dictionary, Ref}]),
+
+    PIRes = process_info(Pid, [async_dist,
+                               trap_exit,
+                               {dictionary, hej},
+                               {dictionary, hopp},
+                               {dictionary, Ref},
+                               {dictionary, Int0},
+                               async_dist,
+                               trap_exit,
+                               {dictionary, Pid},
+                               {dictionary, Tuple},
+                               {dictionary, Bin}]),
+    ct:log("PIRes = ~p", [PIRes]),
+    PIRes = [{async_dist, AsyncDist},
+             {trap_exit, false},
+             {{dictionary, hej}, hopp},
+             {{dictionary, hopp}, hej},
+             {{dictionary, Ref}, Int0},
+             {{dictionary, Int0}, Int1},
+             {async_dist, AsyncDist},
+             {trap_exit, false},
+             {{dictionary, Pid}, Ref},
+             {{dictionary, Tuple}, Bin},
+             {{dictionary, Bin}, Ref}],
+
+    pdh(Pid, erase_async, [hej]),
+    pdh(Pid, erase_async, [hopp]),
+    pdh(Pid, erase_async, [Ref]),
+    pdh(Pid, erase_async, [Int0]),
+    pdh(Pid, erase_async, [Pid]),
+    pdh(Pid, erase_async, [Tuple]),
+    Ref = pdh(Pid, erase, [Bin]),
+
+    erlang:garbage_collect(Pid),
+
+    {{dictionary, Ref}, undefined} = process_info(Pid, {dictionary, Ref}),
+    [{{dictionary, Ref}, undefined}] = process_info(Pid, [{dictionary, Ref}]),
+
+    PIRes2 = process_info(Pid, [async_dist,
+                                trap_exit,
+                                {dictionary, hej},
+                                {dictionary, hopp},
+                                {dictionary, Ref},
+                                {dictionary, Int0},
+                                async_dist,
+                                trap_exit,
+                                {dictionary, Pid},
+                                {dictionary, Tuple},
+                                {dictionary, Bin}]),
+    ct:log("PIRes2 = ~p", [PIRes2]),
+
+    PIRes2 = [{async_dist, AsyncDist},
+             {trap_exit, false},
+             {{dictionary, hej}, undefined},
+             {{dictionary, hopp}, undefined},
+             {{dictionary, Ref}, undefined},
+             {{dictionary, Int0}, undefined},
+             {async_dist, AsyncDist},
+             {trap_exit, false},
+             {{dictionary, Pid}, undefined},
+             {{dictionary, Tuple}, undefined},
+             {{dictionary, Bin}, undefined}],
+
+    unlink(Pid),
+    exit(Pid,kill),
+
+    %% Also check that it works on ourself...
+
+    put(hej, hopp),
+    put(hopp, hej),
+    put(Ref, Int0),
+    put(Int0, Int1),
+    put(Pid, Ref),
+    put(Tuple, Bin),
+    undefined = put(Bin, Ref),
+
+    erlang:garbage_collect(),
+
+    {{dictionary, Ref}, Int0} = process_info(self(), {dictionary, Ref}),
+    [{{dictionary, Ref}, Int0}] = process_info(self(), [{dictionary, Ref}]),
+
+    PIRes3 = process_info(self(), [async_dist,
+                                   trap_exit,
+                                   {dictionary, hej},
+                                   {dictionary, hopp},
+                                   {dictionary, Ref},
+                                   {dictionary, Int0},
+                                   async_dist,
+                                   trap_exit,
+                                   {dictionary, Pid},
+                                   {dictionary, Tuple},
+                                   {dictionary, Bin}]),
+    ct:log("PIRes3 = ~p", [PIRes3]),
+    PIRes3 = [{async_dist, AsyncDist},
+              {trap_exit, false},
+              {{dictionary, hej}, hopp},
+              {{dictionary, hopp}, hej},
+              {{dictionary, Ref}, Int0},
+              {{dictionary, Int0}, Int1},
+              {async_dist, AsyncDist},
+              {trap_exit, false},
+              {{dictionary, Pid}, Ref},
+              {{dictionary, Tuple}, Bin},
+              {{dictionary, Bin}, Ref}],
+
+    erase(hej),
+    erase(hopp),
+    erase(Ref),
+    erase(Int0),
+    erase(Pid),
+    erase(Tuple),
+    Ref = erase(Bin),
+
+    erlang:garbage_collect(),
+
+    {{dictionary, Ref}, undefined} = process_info(self(), {dictionary, Ref}),
+    [{{dictionary, Ref}, undefined}] = process_info(self(), [{dictionary, Ref}]),
+
+    PIRes4 = process_info(self(), [async_dist,
+                                   trap_exit,
+                                   {dictionary, hej},
+                                   {dictionary, hopp},
+                                   {dictionary, Ref},
+                                   {dictionary, Int0},
+                                   async_dist,
+                                   trap_exit,
+                                   {dictionary, Pid},
+                                   {dictionary, Tuple},
+                                   {dictionary, Bin}]),
+    ct:log("PIRes4 = ~p", [PIRes4]),
+
+    PIRes4 = [{async_dist, AsyncDist},
+              {trap_exit, false},
+              {{dictionary, hej}, undefined},
+              {{dictionary, hopp}, undefined},
+              {{dictionary, Ref}, undefined},
+              {{dictionary, Int0}, undefined},
+              {async_dist, AsyncDist},
+              {trap_exit, false},
+              {{dictionary, Pid}, undefined},
+              {{dictionary, Tuple}, undefined},
+              {{dictionary, Bin}, undefined}],
+
+    false = is_process_alive(Pid),
+    ok.
+
+pdh(Pid, AsyncOp, Args) when AsyncOp == put_async;
+                             AsyncOp == erase_async ->
+    Pid ! {AsyncOp, Args},
+    ok;
+pdh(Pid, SyncOp, Args) ->
+    Ref = make_ref(),
+    Pid ! {SyncOp, self(), Ref, Args},
+    receive {Ref, Res} -> Res end.
+
+proc_dict_helper() ->
+    receive
+        {put, From, Ref, [Key, Value]} ->
+            From ! {Ref, put(Key, Value)};
+        {get, From, Ref, [Key]} ->
+            From ! {Ref, get(Key)};
+        {get, From, Ref, []} ->
+            From ! {Ref, get()};
+        {erase, From, Ref, [Key]} ->
+            From ! {Ref, erase(Key)};
+        {put_async, [Key, Value]} ->
+            _ = put(Key, Value);
+        {erase_async, [Key]} ->
+            _ = erase(Key)
+    end,
+    proc_dict_helper().
 
 %% Tests erlang:bump_reductions/1.
 bump_reductions(Config) when is_list(Config) ->
@@ -3966,6 +4194,75 @@ spawn_request_reply_option_test(Peer, Node) ->
             ok
     end.
 
+dist_spawn_arg_list_mixup(Config) when is_list(Config) ->
+    %% A process newly spawned via the distribution is passed the
+    %% argument list to use as the first message followed by an intialization
+    %% message. Those two messages *must* be the first messages in its queue
+    %% when it begins execution. The parallel receive/send signal optimization
+    %% could potentially cause reordering of messages if certain future
+    %% changes are made. This test case tries to cause a situation where a
+    %% message reordering potentially could happen, and hopefully will detect
+    %% such problematic changes.
+    Tester = self(),
+    NoScheds = 8,
+    NoSchedsStr = integer_to_list(NoScheds),
+    NoSchedsList = lists:seq(1, NoScheds),
+    {ok, Peer, Node} = ?CT_PEER(["+S"++NoSchedsStr++":"++NoSchedsStr]),
+    AttackMsg = make_ref(),
+    AttackArgList = [Tester, AttackMsg],
+    OkMsg = make_ref(),
+    As = lists:map(
+           fun (_) ->
+                   spawn_opt(
+                     Node,
+                     fun () ->
+                             dist_spawn_arg_list_mixup_sender(AttackArgList,
+                                                              1000)
+                     end, [{priority, high}, link])
+           end, NoSchedsList),
+    Relay = spawn_opt(
+              Node,
+              fun () ->
+                      receive
+                          {attack, Victim} ->
+                              lists:foreach(fun (A) ->
+                                                    A ! {attack, Victim}
+                                            end, As)
+                      end
+              end, [{priority, max}, link]),
+    receive after 100 -> ok end,
+    Victim = spawn_opt(Node, erlang, send, [Tester, OkMsg],
+                       [{message_queue_data, off_heap},
+                        {priority, normal},
+                        link]),
+    Relay ! {attack, Victim},
+    receive
+        OkMsg ->
+            ok;
+        AttackMsg ->
+            ct:fail(child_process_used_message_as_argument_list)
+    end,
+    lists:foreach(fun (P) ->
+                          unlink(P)
+                  end, [Victim] ++ [Relay] ++ As),
+    peer:stop(Peer),
+    ok.
+
+dist_spawn_arg_list_mixup_sender(Msg, N) ->
+    receive
+        {attack, Victim} ->
+            dist_spawn_arg_list_mixup_sender(Victim, Msg, N)
+    after
+        0 ->
+            dist_spawn_arg_list_mixup_sender(Msg, N)
+    end.
+
+dist_spawn_arg_list_mixup_sender(_Pid, _Msg, 0) ->
+    ok;
+dist_spawn_arg_list_mixup_sender(Pid, Msg, N) ->
+    Pid ! Msg,
+    dist_spawn_arg_list_mixup_sender(Pid, Msg, N-1).
+
 processes_term_proc_list(Config) when is_list(Config) ->
     Tester = self(),
 
@@ -4786,7 +5083,84 @@ alias_bif_test(Node) ->
                               end),
     [{A3,1},{'DOWN', M3, _, _, _}] = recv_msgs(2),
     ok.
-             
+
+dist_frag_alias(Config) when is_list(Config) ->
+    Tester = self(),
+    {ok, Peer, Node} = ?CT_PEER(),
+    {P,M} = spawn_monitor(Node,
+                          fun () ->
+                                  Alias = alias(),
+                                  Tester ! {alias, Alias},
+                                  receive
+                                      {data, Data} ->
+                                          garbage_collect(),
+                                          Tester ! {received_data, Data}
+                                  end,
+                                  exit(end_of_test)
+                          end),
+    Data = term_to_binary(lists:seq(1, 1000000)),
+    receive
+        {alias, Alias} ->
+            Alias ! {data, Data},
+            receive
+                {received_data, RecvData} ->
+                    Data = RecvData;
+                {'DOWN', M, process, P, R2} ->
+                    ct:fail(R2)
+            end;
+        {'DOWN', M, process, P, R1} ->
+            ct:fail(R1)
+    end,
+    receive
+        {'DOWN', M, process, P, R3} ->
+            end_of_test = R3
+    end,
+    peer:stop(Peer),
+    ok.
+
+dist_frag_unaliased(Config) when is_list(Config) ->
+    %% Leak fixed by PR-7915 would have been detected using asan or valgrind
+    %% when running this test...
+    Tester = self(),
+    {ok, Peer, Node} = ?CT_PEER(),
+    {P,M} = spawn_monitor(Node,
+                          fun () ->
+                                  Alias = alias(),
+                                  Tester ! {alias, Alias},
+                                  receive
+                                      {data, Data} ->
+                                          garbage_collect(),
+                                          unalias(Alias),
+                                          Tester ! {received_data, Data},
+                                          receive
+                                              {data, _Data} ->
+                                                  exit(received_data_again);
+                                              end_of_test ->
+                                                  exit(end_of_test)
+                                          end
+                                  end
+                          end),
+    Data = term_to_binary(lists:seq(1, 1000000)),
+    receive
+        {alias, Alias} ->
+            Alias ! {data, Data},
+            receive
+                {received_data, RecvData} ->
+                    Data = RecvData;
+                {'DOWN', M, process, P, R2} ->
+                    ct:fail(R2)
+            end,
+            Alias ! {data, Data},
+            P ! end_of_test;
+        {'DOWN', M, process, P, R1} ->
+            ct:fail(R1)
+    end,
+    receive
+        {'DOWN', M, process, P, R3} ->
+            end_of_test = R3
+    end,
+    peer:stop(Peer),
+    ok.
 
 monitor_alias(Config) when is_list(Config) ->
     monitor_alias_test(node()),

@@ -70,7 +70,7 @@
 
 %% Types that can be used from other modules -- alphabetically ordered.
 -export_type([date_time/0, fd/0, file_info/0, filename/0, filename_all/0,
-              io_device/0, mode/0, name/0, name_all/0, posix/0]).
+              io_device/0, location/0, mode/0, name/0, name_all/0, posix/0]).
 
 %%% Includes and defines
 -include("file_int.hrl").
@@ -582,7 +582,7 @@ allocate(#file_descriptor{module = Module} = Handle, Offset, Length) ->
     Module:allocate(Handle, Offset, Length).
 
 -spec read(IoDevice, Number) -> {ok, Data} | eof | {error, Reason} when
-      IoDevice :: io_device() | atom(),
+      IoDevice :: io_device() | io:device(),
       Number :: non_neg_integer(),
       Data :: string() | binary(),
       Reason :: posix()
@@ -604,7 +604,7 @@ read(_, _) ->
     {error, badarg}.
 
 -spec read_line(IoDevice) -> {ok, Data} | eof | {error, Reason} when
-      IoDevice :: io_device() | atom(),
+      IoDevice :: io_device() | io:device(),
       Data :: string() | binary(),
       Reason :: posix()
               | badarg
@@ -668,7 +668,7 @@ pread(_, _, _) ->
     {error, badarg}.
 
 -spec write(IoDevice, Bytes) -> ok | {error, Reason} when
-      IoDevice :: io_device() | atom(),
+      IoDevice :: io_device() | io:device(),
       Bytes :: iodata(),
       Reason :: posix() | badarg | terminated.
 
@@ -1481,6 +1481,8 @@ consult_stream(Fd, Line, Acc) ->
     case io:read(Fd, '', Line) of
 	{ok,Term,EndLine} ->
 	    consult_stream(Fd, EndLine, [Term|Acc]);
+	{error,Error} ->
+	    {error,Error};
 	{error,Error,_Line} ->
 	    {error,Error};
 	{eof,_Line} ->

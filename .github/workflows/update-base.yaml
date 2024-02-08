@@ -15,17 +15,22 @@ jobs:
     if: github.repository == 'erlang/otp'
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+
     strategy:
       matrix:
         type: [debian-base,ubuntu-base,i386-debian-base]
-        branch: [master, maint, maint-25]
+        branch: [master, maint, maint-26]
+      fail-fast: false
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4.1.1
         with:
           ref: ${{ matrix.branch }}
       - name: Docker login
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3.0.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

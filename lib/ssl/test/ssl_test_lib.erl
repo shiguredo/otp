@@ -2866,21 +2866,21 @@ openssl_tls_version_support(Proto, Opts, Port, Exe, Args0) ->
                     close_port(OpensslPort),
                     true;
                 {error, {tls_alert, {protocol_version, _}}} ->
-                    ?CT_PAL("OpenSSL does not support ~p", [proplists:get_value(versions, Opts)]),
+                    ?CT_LOG("OpenSSL does not support ~p", [proplists:get_value(versions, Opts)]),
                     close_port(OpensslPort),
                     false;
                 {error, {tls_alert, Alert}} ->
-                    ?CT_PAL("OpenSSL returned alert ~p", [Alert]),
+                    ?CT_LOG("OpenSSL returned alert ~p", [Alert]),
                     close_port(OpensslPort),
                     false;
                 {error, timeout} ->
-                    ?CT_PAL("Timed out connection to OpenSSL", []),
+                    ?CT_LOG("Timed out connection to OpenSSL", []),
                     close_port(OpensslPort),
                     false
             end
     catch
         _:_ ->
-            ?CT_PAL("OpenSSL does not support ~p", [proplists:get_value(versions, Opts)]),
+            ?CT_LOG("OpenSSL does not support ~p", [proplists:get_value(versions, Opts)]),
             close_port(OpensslPort),
             false
     end.
@@ -2946,7 +2946,7 @@ check_key_exchange(KeyEx1, KeyEx2, Version) ->
         'dtlsv1.2' ->
             v_1_2_check(element(1, KeyEx1), KeyEx2);
         _ ->       
-            ?CT_PAL("Negotiated ~p  Expected ~p", [KeyEx1, KeyEx2]),
+            ?CT_LOG("Negotiated ~p  Expected ~p", [KeyEx1, KeyEx2]),
             false
     end.
 
@@ -3534,9 +3534,12 @@ portable_open_port("openssl" = Exe, Args0) ->
 			end,
 	    Args1 = [Translate(Arg) || Arg <- Args0],
 	    Args = ["/C","wsl","openssl"| Args1] ++ ["2>&1"],
-	    Cmd =  os:find_executable("cmd"),
+            Cmd = case erlang:system_info(wordsize) of
+                      8 -> os:find_executable("cmd");
+                      4 -> filename:join(os:getenv("WINDIR"),"sysnative/cmd")
+                  end,
             ?CT_LOG("open_port({spawn_executable, ~p}, [stderr_to_stdout,~n {args, \"~s\"}]).",
-		 [Cmd, lists:join($\s, Args0)]),
+                    [Cmd, lists:join($\s, Args)]),
 	    open_port({spawn_executable, Cmd},
 		      [{args, Args}, stderr_to_stdout, hide])
     end;
@@ -3926,66 +3929,66 @@ session_id(Socket) ->
     
 reuse_session(ClientOpts, ServerOpts, Config) ->
     {ClientNode, ServerNode, Hostname} = run_where(Config),
-    
+
     Server0 =
 	start_server([{node, ServerNode}, {port, 0},
-				   {from, self()},
-				   {mfa, {ssl_test_lib, no_result, []}},
-				   {tcp_options, [{active, false}]},
-				   {options, ServerOpts}]),
+                      {from, self()},
+                      {mfa, {ssl_test_lib, no_result, []}},
+                      {tcp_options, [{active, false}]},
+                      {options, ServerOpts}]),
     Port0 = inet_port(Server0),
-    
+
     Client0 = start_client([{node, ClientNode},
-                                         {port, Port0}, {host, Hostname},
-                                         {mfa, {ssl_test_lib, session_id, []}},
-                                         {from, self()},  {options, [{reuse_sessions, save} | ClientOpts]}]),
+                            {port, Port0}, {host, Hostname},
+                            {mfa, {ssl_test_lib, session_id, []}},
+                            {from, self()},  {options, [{reuse_sessions, save} | ClientOpts]}]),
     Server0 ! listen,
-    
-    Client1 = start_client([{node, ClientNode},
-                                         {port, Port0}, {host, Hostname},
-                                         {mfa, {ssl_test_lib, session_id, []}},
-                                         {from, self()},  {options, ClientOpts}]),    
 
     SID = receive
               {Client0, Id0} ->
                   Id0
           end,
-       
+
+    Client1 = start_client([{node, ClientNode},
+                            {port, Port0}, {host, Hostname},
+                            {mfa, {ssl_test_lib, session_id, []}},
+                            {from, self()},  {options, ClientOpts}]),
+
     receive
         {Client1, SID} ->
             ok
     after ?SLEEP ->
-              ct:fail(session_not_reused)
+            ct:fail(session_not_reused)
     end,
-  
+
     Server0 ! listen,
-    
+
     Client2 =
         start_client([{node, ClientNode},
-                                   {port, Port0}, {host, Hostname},
-                                   {mfa, {ssl_test_lib, session_id, []}},
-                                   {from, self()},  {options, [{reuse_sessions, false}
-         					  | ClientOpts]}]),   
+                      {port, Port0}, {host, Hostname},
+                      {mfa, {ssl_test_lib, session_id, []}},
+                      {from, self()},  {options, [{reuse_sessions, false}
+                                                 | ClientOpts]}]),   
     receive
-         {Client2, SID} ->
+        {Client2, SID} ->
             ct:fail(session_reused_when_session_reuse_disabled_by_client);
-         {Client2, _} ->
+        {Client2, _} ->
             ok
     end,
-    
+
     close(Server0),
     close(Client0),
     close(Client1),
     close(Client2),
-    
+
     Server1 =
 	start_server([{node, ServerNode}, {port, 0},
-				   {from, self()},
-				   {mfa, {ssl_test_lib, no_result, []}},
-				   {tcp_options, [{active, false}]},
-				   {options, [{reuse_sessions, false} | ServerOpts]}]),
+                      {from, self()},
+                      {mfa, {ssl_test_lib, no_result, []}},
+                      {tcp_options, [{active, false}]},
+                      {options, [{reuse_sessions, false} | ServerOpts]}]),
     Port1 = inet_port(Server1),
-    
+
     Client3 = start_client([{node, ClientNode},
                             {port, Port1}, {host, Hostname},
                             {mfa, {ssl_test_lib, session_id, []}},
@@ -3996,7 +3999,7 @@ reuse_session(ClientOpts, ServerOpts, Config) ->
            end,
 
     Server1 ! listen,
-    
+
     Client4 =
         start_client([{node, ClientNode},
                       {port, Port1}, {host, Hostname},
@@ -4009,7 +4012,7 @@ reuse_session(ClientOpts, ServerOpts, Config) ->
         {Client4, _} ->
             ok
     end,
-    
+
     close(Server1),
     close(Client3),
     close(Client4).
@@ -4179,6 +4182,8 @@ openssl_maxfraglen_support() ->
             false;
 	"OpenSSL 1.1.1" ++ _ ->
             true;
+        "OpenSSL 3.0" ++ _ ->
+            false; %% OpenSSL sends internal error alert
         "OpenSSL" ++ _ ->
             true;
         _  ->
@@ -4282,9 +4287,9 @@ ktls_set_cipher(Socket, OS, TxRx, Seed) ->
 ct_pal_file(FilePath) ->
     case file:read_file(FilePath) of
         {ok, Binary} ->
-            ?CT_PAL("~s ~pB~n~s",
+            ?CT_LOG("~s ~pB~n~s",
                     [FilePath, filelib:file_size(FilePath), Binary]);
         _ ->
-            ?CT_PAL("Failed to log ~s", [FilePath]),
+            ?CT_LOG("Failed to log ~s", [FilePath]),
             ok
     end.
