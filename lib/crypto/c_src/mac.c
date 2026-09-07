@@ -522,6 +522,24 @@ struct mac_context
 
 static ErlNifResourceType* mac_context_rtype;
 
+#if !defined(HAS_3_0_API) && defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+/*
+ * Incremental CMAC for cryptolibs without EVP_PKEY_new_CMAC_key (e.g. AWS-LC).
+ * A separate resource type is used to keep the layout of mac_context
+ * unchanged, since instances created by an older version of this library may
+ * still be alive (ERL_NIF_RT_TAKEOVER).
+ */
+struct cmac_context
+{
+    CMAC_CTX *ctx;
+    size_t size;
+};
+
+static ErlNifResourceType* cmac_context_rtype;
+
+static void cmac_context_dtor(ErlNifEnv* env, struct cmac_context* obj);
+#endif
+
 static void mac_context_dtor(ErlNifEnv* env, struct mac_context*);
 
 int init_mac_ctx(ErlNifEnv *env, ErlNifBinary* rt_buf) {
@@ -532,6 +550,16 @@ int init_mac_ctx(ErlNifEnv *env, ErlNifBinary* rt_buf) {
                                                 NULL);
     if (mac_context_rtype == NULL)
         goto err;
+
+#if !defined(HAS_3_0_API) && defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    cmac_context_rtype = enif_open_resource_type(env, NULL,
+                                                 resource_name("cmac_context", rt_buf),
+                                                 (ErlNifResourceDtor*) cmac_context_dtor,
+                                                 ERL_NIF_RT_CREATE|ERL_NIF_RT_TAKEOVER,
+                                                 NULL);
+    if (cmac_context_rtype == NULL)
+        goto err;
+#endif
 
     return 1;
 
@@ -554,6 +582,17 @@ static void mac_context_dtor(ErlNifEnv* env, struct mac_context *obj)
 #endif
     }
 }
+
+#if !defined(HAS_3_0_API) && defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+static void cmac_context_dtor(ErlNifEnv* env, struct cmac_context *obj)
+{
+    if (obj == NULL)
+        return;
+
+    if (obj->ctx)
+        CMAC_CTX_free(obj->ctx);
+}
+#endif
 
 /*******************************************************************
  *
@@ -586,6 +625,11 @@ ERL_NIF_TERM mac_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     /* EVP_PKEY_CTX is available */
     const EVP_MD *md = NULL;
     EVP_PKEY *pkey = NULL;
+#  if defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    CMAC_CTX *cmac_ctx = NULL;
+    size_t cmac_size = 0;
+    struct cmac_context *cmac_obj = NULL;
+#  endif
 # endif
 
     /*---------------------------------
@@ -663,7 +707,7 @@ ERL_NIF_TERM mac_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         /********
          * CMAC *
          ********/
-# if defined(HAVE_CMAC) && defined(HAVE_EVP_PKEY_new_CMAC_key)
+# ifdef HAVE_CMAC
     case CMAC_mac:
         {
             const struct cipher_type_t *cipherp;
@@ -691,13 +735,27 @@ ERL_NIF_TERM mac_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
 #  if defined(HAS_3_0_API)
             cipher = cipherp->str_v3;
-#  else
+#  elif defined(HAVE_EVP_PKEY_new_CMAC_key)
             /* Old style */
             pkey = EVP_PKEY_new_CMAC_key(/*engine*/ NULL, key_bin.data,  key_bin.size, cipherp->cipher.p);
+#  else
+            /* CMAC without EVP_PKEY, e.g. AWS-LC. Use the low-level interface
+             * like the one-shot cmac_low_level() does. */
+            if ((cmac_ctx = CMAC_CTX_new()) == NULL)
+                {
+                    return_term = EXCP_ERROR(env, "CMAC_CTX_new");
+                    goto err;
+                }
+            if (!CMAC_Init(cmac_ctx, key_bin.data, key_bin.size, cipherp->cipher.p, NULL))
+                {
+                    return_term = EXCP_ERROR(env, "CMAC_Init");
+                    goto err;
+                }
+            cmac_size = (size_t)EVP_CIPHER_block_size(cipherp->cipher.p);
 #  endif
         }
         break;
-# endif /* HAVE_CMAC && HAVE_EVP_PKEY_new_CMAC_key */
+# endif /* HAVE_CMAC */
 
 
         /************
@@ -751,6 +809,23 @@ ERL_NIF_TERM mac_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
     
 # else
+#  if defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    if (cmac_ctx != NULL) {
+        /* The CMAC implementation does not use EVP_PKEY */
+        if ((cmac_obj = enif_alloc_resource(cmac_context_rtype,
+                                            sizeof(struct cmac_context))) == NULL)
+            {
+                return_term = EXCP_ERROR(env, "Can't allocate cmac_context_rtype");
+                goto err;
+            }
+        cmac_obj->ctx = cmac_ctx;
+        cmac_obj->size = cmac_size;
+        cmac_ctx = NULL;        /* Owned by cmac_obj from now on */
+        return_term = enif_make_resource(env, cmac_obj);
+        goto err;
+    }
+#  endif
+
     /*-----------------------------------------
       Common computations when we have EVP_PKEY_CTX but not 3.0 API
     */
@@ -790,6 +865,12 @@ ERL_NIF_TERM mac_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 # if ! defined(HAS_3_0_API)
     if (pkey)
         EVP_PKEY_free(pkey);
+#  if defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    if (cmac_ctx)
+        CMAC_CTX_free(cmac_ctx);
+    if (cmac_obj)
+        enif_release_resource(cmac_obj);
+#  endif
 # endif
 
     return return_term;
@@ -826,6 +907,20 @@ ERL_NIF_TERM mac_update(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     struct mac_context *obj = NULL;
     ErlNifBinary text;
 
+#if !defined(HAS_3_0_API) && defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    {
+        struct cmac_context *cmac_obj;
+        if (enif_get_resource(env, argv[0], cmac_context_rtype, (void**)&cmac_obj)) {
+            if (!enif_inspect_iolist_as_binary(env, argv[1], &text))
+                return EXCP_BADARG_N(env, 1, "Bad text");
+            if (!CMAC_Update(cmac_obj->ctx, text.data, text.size))
+                return EXCP_ERROR(env, "mac update");
+            CONSUME_REDS(env, text);
+            return argv[0];
+        }
+    }
+#endif
+
     if (!enif_get_resource(env, argv[0], (ErlNifResourceType*)mac_context_rtype, (void**)&obj))
         return EXCP_BADARG_N(env, 0, "Bad ref");
 
@@ -855,7 +950,24 @@ ERL_NIF_TERM mac_final_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     struct mac_context *obj;
     size_t size;
     ErlNifBinary ret_bin;
-    
+
+#if !defined(HAS_3_0_API) && defined(HAVE_CMAC) && !defined(HAVE_EVP_PKEY_new_CMAC_key)
+    {
+        struct cmac_context *cmac_obj;
+        if (enif_get_resource(env, argv[0], cmac_context_rtype, (void**)&cmac_obj)) {
+            size = cmac_obj->size;
+            if (!enif_alloc_binary(size, &ret_bin))
+                return EXCP_ERROR(env, "Alloc binary");
+            if (!CMAC_Final(cmac_obj->ctx, ret_bin.data, &ret_bin.size))
+                {
+                    enif_release_binary(&ret_bin);
+                    return EXCP_ERROR(env, "Signing");
+                }
+            return enif_make_binary(env, &ret_bin);
+        }
+    }
+#endif
+
     if (!enif_get_resource(env, argv[0], (ErlNifResourceType*)mac_context_rtype, (void**)&obj))
         return EXCP_BADARG_N(env, 0, "Bad ref");
 

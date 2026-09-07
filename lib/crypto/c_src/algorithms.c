@@ -113,6 +113,12 @@ void init_hash_types(ErlNifEnv* env) {
 #ifdef HAVE_SHA512
     algo_hash[algo_hash_cnt++] = enif_make_atom(env, "sha512");
 #endif
+#ifdef HAVE_SHA512_224
+    algo_hash[algo_hash_cnt++] = enif_make_atom(env, "sha512_224");
+#endif
+#ifdef HAVE_SHA512_256
+    algo_hash[algo_hash_cnt++] = enif_make_atom(env, "sha512_256");
+#endif
 #ifdef HAVE_SHA3_224
     algo_hash[algo_hash_cnt++] = enif_make_atom(env, "sha3_224");
 #endif
@@ -736,7 +742,11 @@ void init_rsa_opts_types(ErlNifEnv* env) {
     algo_rsa_opts[algo_rsa_opts_cnt++] = enif_make_atom(env,"signature_md");
 #endif
     algo_rsa_opts[algo_rsa_opts_cnt++] = enif_make_atom(env,"rsa_pkcs1_padding");
+#ifndef HAS_AWSLC
+    /* AWS-LC defines RSA_X931_PADDING for source compatibility, but does not
+     * support it in EVP_PKEY_CTX_set_rsa_padding(). */
     algo_rsa_opts[algo_rsa_opts_cnt++] = enif_make_atom(env,"rsa_x931_padding");
+#endif
 #ifdef HAVE_RSA_SSLV23_PADDING
     algo_rsa_opts[algo_rsa_opts_cnt++] = enif_make_atom(env,"rsa_sslv23_padding");
 #endif
