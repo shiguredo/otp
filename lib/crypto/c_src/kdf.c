@@ -29,6 +29,8 @@
 #include <openssl/core_names.h>
 #include "digest.h"
 
+#define KDF_SUPPORTED 1
+
 static struct kdf_type_t kdf_types[] = {
 #ifdef HAVE_ARGON2
     {"argon2id", "ARGON2ID", 0, OSSL_KDF_PARAM_PASSWORD, ARGON2_kdf, 0, NULL},
@@ -44,12 +46,40 @@ static struct kdf_type_t kdf_types[] = {
     {NULL, NULL, 0, NULL, NO_kdf, 0, NULL}
 };
 
+#elif defined(HAS_AWSLC)
+
+/* AWS-LC (5.12.0) provides no EVP_KDF/OSSL_PARAM based KDF API, but the
+ * individual KDFs directly: HKDF (hkdf.h), PBKDF2 and scrypt (evp.h) and
+ * SSKDF (kdf.h). Argon2 is not provided.
+ *
+ * The input_name field is only documentation in this build, so plain
+ * strings are used instead of the unavailable OSSL_KDF_PARAM_* names. */
+#include <openssl/kdf.h>
+#include <openssl/hkdf.h>
+#include "digest.h"
+
+#define KDF_SUPPORTED 1
+
+static struct kdf_type_t kdf_types[] = {
+    {"hkdf",   "HKDF",   0, "key",      HKDF_kdf,   0, NULL},
+    {"pbkdf2", "PBKDF2", 0, "password", PBKDF2_kdf, 0, NULL},
+    {"scrypt", "SCRYPT", 0, "password", SCRYPT_kdf, 0, NULL},
+    {"sskdf",  "SSKDF",  0, "secret",   SSKDF_kdf,  0, NULL},
+
+    /*==== End of list ==== */
+    {NULL, NULL, 0, NULL, NO_kdf, 0, NULL}
+};
+
+#endif /* KDF tables */
+
 void init_kdf_types(ErlNifEnv* env)
 {
+#ifdef KDF_SUPPORTED
     struct kdf_type_t* kdf;
 
     for (kdf = kdf_types; kdf->str; kdf++) {
         kdf->atom = enif_make_atom(env, kdf->str);
+#ifdef HAVE_KDF
         kdf->kdf = EVP_KDF_fetch(NULL, kdf->ossl_name, "");
 
 #ifdef FIPS_SUPPORT
@@ -63,8 +93,14 @@ void init_kdf_types(ErlNifEnv* env)
             }
         }
 #endif
+#endif
     }
+#else
+    (void)env;
+#endif
 }
+
+#ifdef KDF_SUPPORTED
 
 static struct kdf_type_t* get_kdf_type(ERL_NIF_TERM type)
 {
@@ -192,9 +228,9 @@ static int get_uint_opt(ErlNifEnv* env, ERL_NIF_TERM map, ERL_NIF_TERM key,
     return 1;
 }
 
-/* Fetch the digest option as an OSSL digest name. If md is non-NULL it
-   receives the resolved EVP_MD. require_flags is a mask of digest_type_t
-   flags the digest must carry (0 for no extra requirement). */
+/* Fetch the digest option as an OSSL digest name. If name/md is non-NULL it
+   receives the resolved name / EVP_MD. require_flags is a mask of
+   digest_type_t flags the digest must carry (0 for no extra requirement). */
 static int get_digest_opt(ErlNifEnv* env, ERL_NIF_TERM map,
                           const char** name, const EVP_MD** md,
                           unsigned require_flags, ERL_NIF_TERM* return_term)
@@ -235,7 +271,9 @@ static int get_digest_opt(ErlNifEnv* env, ERL_NIF_TERM map,
         return 0;
     }
 
-    *name = digest->str_v3;
+    if (name) {
+        *name = digest->str_v3;
+    }
     if (md) {
         *md = digest->md.p;
     }
@@ -243,6 +281,7 @@ static int get_digest_opt(ErlNifEnv* env, ERL_NIF_TERM map,
     return 1;
 }
 
+#ifdef HAVE_KDF
 static ERL_NIF_TERM kdf_derive(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {/* (Type, KeyMaterial, KeyLen, Options) */
     struct kdf_type_t* kdf;
@@ -628,6 +667,295 @@ static ERL_NIF_TERM kdf_derive(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv
     return ret;
 }
 
+#elif defined(HAS_AWSLC)
+static ERL_NIF_TERM kdf_derive(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{/* (Type, KeyMaterial, KeyLen, Options) */
+    struct kdf_type_t* kdf;
+    ErlNifBinary key_material, salt, info, out;
+    int out_allocated = 0;
+    ERL_NIF_TERM ret;
+    uint64_t iterations, scn, scr, scp, maxmem;
+    ErlNifUInt64 keylen;
+    int present;
+    int mode_val = EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND;
+    const EVP_MD* md = NULL;
+
+    ASSERT(argc == 4);
+
+    if ((kdf = get_kdf_type(argv[0])) == NULL) {
+        return EXCP_BADARG_N(env, 0, "Unknown KDF");
+    }
+
+    if (!enif_inspect_binary(env, argv[1], &key_material)) {
+        return EXCP_BADARG_N(env, 1, "Key material must be a binary");
+    }
+
+    if (!enif_get_uint64(env, argv[2], &keylen) || keylen < 1 || keylen > INT_MAX) {
+        return EXCP_BADARG_N(env, 2, "Bad key length");
+    }
+
+    if (!enif_is_map(env, argv[3])) {
+        return EXCP_BADARG_N(env, 3, "Not a map");
+    }
+
+    if (!enif_alloc_binary((size_t)keylen, &out)) {
+        return EXCP_ERROR(env, "Can't allocate binary");
+    }
+    out_allocated = 1;
+
+    switch (kdf->kind) {
+
+    case HKDF_kdf: {
+        const ERL_NIF_TERM allowed[] = {atom_digest, atom_salt, atom_info, atom_mode};
+        ERL_NIF_TERM mode;
+        const uint8_t *saltp = NULL, *infop = NULL;
+        size_t salt_len = 0, info_len = 0;
+        int md_size;
+
+        if (!check_options(env, argv[3], allowed, 4, &ret)) {
+            goto done;
+        }
+
+        if (!get_digest_opt(env, argv[3], NULL, &md, 0, &ret)) {
+            goto done;
+        }
+
+        if (enif_get_map_value(env, argv[3], atom_mode, &mode)) {
+            if (mode == atom_extract_and_expand) {
+                mode_val = EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND;
+            } else if (mode == atom_extract_only) {
+                mode_val = EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY;
+                if (keylen != (ErlNifUInt64)EVP_MD_size(md)) {
+                    ret = EXCP_BADARG_N(env, 2,
+                        "extract_only KeyLen must equal the digest size");
+                    goto done;
+                }
+            } else if (mode == atom_expand_only) {
+                mode_val = EVP_PKEY_HKDEF_MODE_EXPAND_ONLY;
+            } else {
+                ret = EXCP_BADARG_N(env, 3, "Bad hkdf mode");
+                goto done;
+            }
+        }
+
+        /* HKDF-Expand can emit at most 255 * HashLen bytes (RFC 5869 2.3).
+           extract_only is pinned to the digest size above; every other mode
+           (default == extract_and_expand, and expand_only) expands. */
+        md_size = EVP_MD_size(md);
+        if (mode_val != EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY
+            && md_size > 0
+            && keylen > (ErlNifUInt64)255 * md_size) {
+            ret = EXCP_BADARG_N(env, 2,
+                "KeyLen must be at most 255 times the digest size");
+            goto done;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_salt, "salt", 0, &salt, &present, &ret)) {
+            goto done;
+        }
+
+        if (present) {
+            if (mode_val == EVP_PKEY_HKDEF_MODE_EXPAND_ONLY) {
+                ret = EXCP_BADARG_N(env, 3,
+                                    "Option salt not used with mode => expand_only");
+                goto done;
+            }
+            saltp = salt.data;
+            salt_len = salt.size;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_info, "info", 0, &info, &present, &ret)) {
+            goto done;
+        }
+
+        if (present) {
+            if (mode_val == EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY) {
+                ret = EXCP_BADARG_N(env, 3,
+                                    "Option info not used with mode => extract_only");
+                goto done;
+            }
+            infop = info.data;
+            info_len = info.size;
+        }
+
+        if (mode_val == EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND) {
+            if (!HKDF(out.data, (size_t)keylen, md, key_material.data, key_material.size,
+                      saltp, salt_len, infop, info_len)) {
+                ret = EXCP_ERROR(env, "Low-level call HKDF failed");
+                goto done;
+            }
+        } else if (mode_val == EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY) {
+            size_t out_len = (size_t)keylen;
+            if (!HKDF_extract(out.data, &out_len, md, key_material.data, key_material.size,
+                              saltp, salt_len)) {
+                ret = EXCP_ERROR(env, "Low-level call HKDF_extract failed");
+                goto done;
+            }
+        } else { /* EVP_PKEY_HKDEF_MODE_EXPAND_ONLY */
+            if (!HKDF_expand(out.data, (size_t)keylen, md, key_material.data, key_material.size,
+                             infop, info_len)) {
+                ret = EXCP_ERROR(env, "Low-level call HKDF_expand failed");
+                goto done;
+            }
+        }
+
+        break;
+    }
+
+    case PBKDF2_kdf: {
+        const ERL_NIF_TERM allowed[] = {atom_digest, atom_salt, atom_iterations};
+        if (!check_options(env, argv[3], allowed, 3, &ret)) {
+            goto done;
+        }
+
+        if (!get_digest_opt(env, argv[3], NULL, &md, PBKDF2_ELIGIBLE_DIGEST, &ret)) {
+            goto done;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_salt, "salt", 1, &salt, &present, &ret)) {
+            goto done;
+        }
+
+        if (!get_uint_opt(env, argv[3], atom_iterations, "iterations", 1, UINT32_MAX,
+                          &iterations, &present, &ret)) {
+            goto done;
+        }
+
+        if (!PKCS5_PBKDF2_HMAC((const char*)key_material.data, key_material.size,
+                               salt.data, salt.size, (uint32_t)iterations, md,
+                               (size_t)keylen, out.data)) {
+            ret = EXCP_ERROR(env, "Low-level call PKCS5_PBKDF2_HMAC failed");
+            goto done;
+        }
+
+        break;
+    }
+
+    case SCRYPT_kdf: {
+        const ERL_NIF_TERM allowed[] = {atom_salt, atom_n, atom_r, atom_p, atom_maxmem};
+        if (!check_options(env, argv[3], allowed, 5, &ret)) {
+            goto done;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_salt, "salt", 1, &salt, &present, &ret)) {
+            goto done;
+        }
+
+        if (!get_uint_opt(env, argv[3], atom_n, "n", 1, 0, &scn, &present, &ret)) {
+            goto done;
+        }
+
+        if (scn < 2 || (scn & (scn - 1)) != 0) {
+            ret = EXCP_BADARG_N(env, 3,
+                                "Option n must be a power of two greater than 1");
+            goto done;
+        }
+
+        if (!get_uint_opt(env, argv[3], atom_r, "r", 1, UINT32_MAX, &scr, &present, &ret)) {
+            goto done;
+        }
+
+        if (!get_uint_opt(env, argv[3], atom_p, "p", 1, UINT32_MAX, &scp, &present, &ret)) {
+            goto done;
+        }
+
+        /* Pass maxmem through only when supplied; otherwise 0 lets AWS-LC
+           apply its own default (32MiB) memory limit. */
+        if (!get_uint_opt(env, argv[3], atom_maxmem, "maxmem", 0, 0, &maxmem, &present, &ret)) {
+            goto done;
+        }
+
+        if (!EVP_PBE_scrypt((const char*)key_material.data, key_material.size,
+                            salt.data, salt.size, scn, scr, scp,
+                            present ? (size_t)maxmem : 0,
+                            out.data, (size_t)keylen)) {
+            ret = EXCP_ERROR(env, "Low-level call EVP_PBE_scrypt failed");
+            goto done;
+        }
+
+        break;
+    }
+
+    case SSKDF_kdf: {
+        const ERL_NIF_TERM allowed[] = {atom_digest, atom_mac, atom_salt, atom_info};
+        int has_mac = 0;
+        ERL_NIF_TERM mac;
+        const uint8_t *saltp = NULL, *infop = NULL;
+        size_t salt_len = 0, info_len = 0;
+
+        if (!check_options(env, argv[3], allowed, 4, &ret)) {
+            goto done;
+        }
+
+        if (!get_digest_opt(env, argv[3], NULL, &md, 0, &ret)) {
+            goto done;
+        }
+
+        if (enif_get_map_value(env, argv[3], atom_mac, &mac)) {
+            if (mac != atom_hmac) {
+                ret = EXCP_BADARG_N(env, 3, "Bad mac type");
+                goto done;
+            }
+            has_mac = 1;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_salt, "salt", 0, &salt, &present, &ret)) {
+            goto done;
+        }
+
+        if (present) {
+            /* SSKDF only uses salt as the HMAC key */
+            if (!has_mac) {
+                ret = EXCP_BADARG_N(env, 3, "Option salt requires mac => hmac");
+                goto done;
+            }
+            saltp = salt.data;
+            salt_len = salt.size;
+        }
+
+        if (!get_bin_opt(env, argv[3], atom_info, "info", 0, &info, &present, &ret)) {
+            goto done;
+        }
+
+        if (present) {
+            infop = info.data;
+            info_len = info.size;
+        }
+
+        if (has_mac) {
+            if (!SSKDF_hmac(out.data, (size_t)keylen, md, key_material.data, key_material.size,
+                            infop, info_len, saltp, salt_len)) {
+                ret = EXCP_ERROR(env, "Low-level call SSKDF_hmac failed");
+                goto done;
+            }
+        } else {
+            if (!SSKDF_digest(out.data, (size_t)keylen, md, key_material.data, key_material.size,
+                              infop, info_len)) {
+                ret = EXCP_ERROR(env, "Low-level call SSKDF_digest failed");
+                goto done;
+            }
+        }
+
+        break;
+    }
+
+    default:
+        ret = EXCP_NOTSUP(env, "Unsupported KDF");
+        goto done;
+    }
+
+    out_allocated = 0;
+    ret = enif_make_binary(env, &out);
+
+ done:
+    if (out_allocated) {
+        enif_release_binary(&out);
+    }
+
+    return ret;
+}
+#endif /* kdf_derive */
+
 /* True if the caller-controlled binary inputs (the key material plus every
    binary-valued option in the map) total no more than MAX_BYTES_TO_NIF. Used to
    keep long HMAC/hash passes off the normal schedulers. */
@@ -668,19 +996,11 @@ static int kdf_is_small_input(ErlNifEnv* env, ERL_NIF_TERM key_material, ERL_NIF
 
     return total <= MAX_BYTES_TO_NIF;
 }
-
-#else /* !HAVE_KDF */
-
-void init_kdf_types(ErlNifEnv* env)
-{
-    (void)env;
-}
-
-#endif /* HAVE_KDF */
+#endif /* KDF_SUPPORTED */
 
 ERL_NIF_TERM kdf_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {/* (Type, KeyMaterial, KeyLen, Options) */
-#ifdef HAVE_KDF
+#ifdef KDF_SUPPORTED
     struct kdf_type_t* kdfp;
 
     ASSERT(argc == 4);
@@ -740,11 +1060,12 @@ ERL_NIF_TERM kdf_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
 ERL_NIF_TERM kdf_algorithms(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {/* () */
-#ifdef HAVE_KDF
+#ifdef KDF_SUPPORTED
     ERL_NIF_TERM ret = enif_make_list(env, 0);
     struct kdf_type_t* kdf;
 
     for (kdf = kdf_types; kdf->str; kdf++) {
+#ifdef HAVE_KDF
         if (kdf->kdf == NULL) {
             continue;
         }
@@ -752,7 +1073,7 @@ ERL_NIF_TERM kdf_algorithms(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         if (KDF_FORBIDDEN_IN_FIPS(kdf)) {
             continue;
         }
-
+#endif
         ret = enif_make_list_cell(env, kdf->atom, ret);
     }
     return ret;

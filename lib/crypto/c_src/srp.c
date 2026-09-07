@@ -23,6 +23,23 @@
 #include "srp.h"
 #include "bn.h"
 
+/*
+ * All exponentiations below involve secret exponents. OpenSSL selects a
+ * constant time implementation when BN_FLG_CONSTTIME is set, but AWS-LC
+ * defines BN_FLG_CONSTTIME as 0 (BN_set_flags() is a no-op), so for AWS-LC
+ * the constant time variant must be called explicitly instead.
+ */
+static int srp_mod_exp(BIGNUM *r, const BIGNUM *a, BIGNUM *p,
+                       const BIGNUM *m, BN_CTX *ctx)
+{
+#ifdef HAS_AWSLC
+    return BN_mod_exp_mont_consttime(r, a, p, m, ctx, NULL);
+#else
+    BN_set_flags(p, BN_FLG_CONSTTIME);
+    return BN_mod_exp(r, a, p, m, ctx);
+#endif
+}
+
 ERL_NIF_TERM srp_value_B_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {/* (Multiplier, Verifier, Generator, Exponent, Prime) */
     BIGNUM *bn_verifier = NULL;
@@ -59,8 +76,7 @@ ERL_NIF_TERM srp_value_B_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
         goto err;
 
     /* g^b % N */
-    BN_set_flags(bn_exponent, BN_FLG_CONSTTIME);
-    if (!BN_mod_exp(bn_result, bn_generator, bn_exponent, bn_prime, bn_ctx))
+    if (!srp_mod_exp(bn_result, bn_generator, bn_exponent, bn_prime, bn_ctx))
         goto err;
 
     /* k*v + g^b % N */
@@ -157,8 +173,7 @@ ERL_NIF_TERM srp_user_secret_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     /* (B - (k * g^x)) */
     if ((bn_base = BN_new()) == NULL)
         goto err;
-    BN_set_flags(bn_exponent, BN_FLG_CONSTTIME);
-    if (!BN_mod_exp(bn_result, bn_generator, bn_exponent, bn_prime, bn_ctx))
+    if (!srp_mod_exp(bn_result, bn_generator, bn_exponent, bn_prime, bn_ctx))
         goto err;
     if (!BN_mod_mul(bn_result, bn_multiplier, bn_result, bn_prime, bn_ctx))
         goto err;
@@ -174,8 +189,7 @@ ERL_NIF_TERM srp_user_secret_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
         goto err;
 
     /* (B - (k * g^x)) ^ (a + (u * x)) % N */
-    BN_set_flags(bn_exp2, BN_FLG_CONSTTIME);
-    if (!BN_mod_exp(bn_result, bn_base, bn_exp2, bn_prime, bn_ctx))
+    if (!srp_mod_exp(bn_result, bn_base, bn_exp2, bn_prime, bn_ctx))
         goto err;
 
     if ((dlen = BN_num_bytes(bn_result)) < 0)
@@ -263,15 +277,13 @@ ERL_NIF_TERM srp_host_secret_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     /* (A * v^u) */
     if ((bn_base = BN_new()) == NULL)
         goto err;
-    BN_set_flags(bn_u, BN_FLG_CONSTTIME);
-    if (!BN_mod_exp(bn_base, bn_verifier, bn_u, bn_prime, bn_ctx))
+    if (!srp_mod_exp(bn_base, bn_verifier, bn_u, bn_prime, bn_ctx))
         goto err;
     if (!BN_mod_mul(bn_base, bn_A, bn_base, bn_prime, bn_ctx))
         goto err;
 
     /* (A * v^u) ^ b % N */
-    BN_set_flags(bn_b, BN_FLG_CONSTTIME);
-    if (!BN_mod_exp(bn_result, bn_base, bn_b, bn_prime, bn_ctx))
+    if (!srp_mod_exp(bn_result, bn_base, bn_b, bn_prime, bn_ctx))
         goto err;
 
     if ((dlen = BN_num_bytes(bn_result)) < 0)

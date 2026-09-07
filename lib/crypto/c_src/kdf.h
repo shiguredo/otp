@@ -25,7 +25,7 @@
 
 #include "common.h"
 
-#ifdef HAVE_KDF
+#if defined(HAVE_KDF) || defined(HAS_AWSLC)
 
 enum kdf_kind {
     NO_kdf = 0,
@@ -40,10 +40,13 @@ struct kdf_type_t {
     const char *str;          /* before init, NULL for end-of-table */
     const char *ossl_name;    /* the KDF name as in OpenSSL 3.x */
     ERL_NIF_TERM atom;        /* after init */
-    const char *input_name;   /* OSSL_KDF_PARAM_* of the key material */
+    const char *input_name;   /* OSSL_KDF_PARAM_* of the key material
+                                 (a plain string when building against AWS-LC) */
     int kind;                 /* enum kdf_kind */
     unsigned flags;
+#ifdef HAVE_KDF
     EVP_KDF *kdf;             /* after init, NULL if notsup */
+#endif
 };
 
 /* masks in the flags field of kdf_type_t */
@@ -55,7 +58,7 @@ struct kdf_type_t {
 # define KDF_FORBIDDEN_IN_FIPS(P) 0
 #endif
 
-#endif /* HAVE_KDF */
+#endif /* HAVE_KDF || HAS_AWSLC */
 
 void init_kdf_types(ErlNifEnv* env);
 

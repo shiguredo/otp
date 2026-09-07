@@ -37,6 +37,11 @@
 #if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,0)
 struct evp_md_ctx {
     EVP_MD_CTX* ctx;
+#ifdef HAS_AWSLC
+    /* Default output length for XOF digests (SHAKE), 0 otherwise.
+     * AWS-LC has no default output length for SHAKE, see hash_final_nif(). */
+    unsigned int xof_default_length;
+#endif
 };
 
 /* Define resource types for OpenSSL context structures. */
@@ -91,7 +96,16 @@ ERL_NIF_TERM hash_info_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return RAISE_NOTSUP(env);
 
     values[0] = enif_make_int(env, EVP_MD_type(md));
+#if defined(HAS_AWSLC)
+    /* AWS-LC has no default output length for SHAKE (EVP_MD_size() is 0),
+     * so report the output length that crypto:hash/2 uses. */
+    values[1] = enif_make_int(env,
+                              digp->xof_default_length != 0
+                              ? (int)digp->xof_default_length
+                              : (int)EVP_MD_size(md));
+#else
     values[1] = enif_make_int(env, EVP_MD_size(md));
+#endif
     values[2] = enif_make_int(env, EVP_MD_block_size(md));
     ok = enif_make_map_from_arrays(env, keys, values, 3, &ret);
     ASSERT(ok); (void)ok;
@@ -129,6 +143,36 @@ ERL_NIF_TERM hash_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         params[0] = OSSL_PARAM_construct_uint("xoflen", &digp->xof_default_length);
         params[1] = OSSL_PARAM_construct_end();
         if (EVP_DigestInit_ex2(ctx, md, params) != 1) {
+            assign_goto(ret, done, EXCP_ERROR(env, "EVP_DigestInit failed"));
+        }
+        ret_size = digp->xof_default_length;
+        if ((outp = enif_make_new_binary(env, ret_size, &ret)) == NULL) {
+            assign_goto(ret, done, EXCP_ERROR(env, "Can't allocate binary"));
+        }
+        if (EVP_DigestUpdate(ctx, data.data, data.size) != 1) {
+            assign_goto(ret, done, EXCP_ERROR(env, "EVP_DigestUpdate failed"));
+        }
+        if (EVP_DigestFinalXOF(ctx, outp, ret_size) != 1) {
+            assign_goto(ret, done, EXCP_ERROR(env, "EVP_DigestFinalXOF failed"));
+        }
+        CONSUME_REDS(env, data);
+    done:
+        EVP_MD_CTX_free(ctx);
+        return ret;
+    }
+#elif defined(HAS_AWSLC)
+    /*
+     * AWS-LC has no default output length for SHAKE: EVP_MD_size() is 0 and
+     * EVP_DigestFinal() fails. It does not support OSSL_PARAM either, so use
+     * EVP_DigestFinalXOF() with the same default length as OpenSSL < 3.4.
+     */
+    if (digp->xof_default_length) {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+
+        if (!ctx) {
+            return EXCP_ERROR(env, "EVP_MD_CTX_new failed");
+        }
+        if (EVP_DigestInit(ctx, md) != 1) {
             assign_goto(ret, done, EXCP_ERROR(env, "EVP_DigestInit failed"));
         }
         ret_size = digp->xof_default_length;
@@ -199,6 +243,9 @@ ERL_NIF_TERM hash_init_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             assign_goto(ret, done, EXCP_ERROR(env, "Can't set param xoflen"));
         }
     }
+#elif defined(HAS_AWSLC)
+    /* Remember the default output length, see hash_final_nif() */
+    ctx->xof_default_length = digp->xof_default_length;
 #endif
 
     ret = enif_make_resource(env, ctx);
@@ -227,6 +274,9 @@ ERL_NIF_TERM hash_update_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
         assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_MD_CTX_new failed"));
     if (EVP_MD_CTX_copy(new_ctx->ctx, ctx->ctx) != 1)
         assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_MD_CTX_copy failed"));
+#ifdef HAS_AWSLC
+    new_ctx->xof_default_length = ctx->xof_default_length;
+#endif
     if (EVP_DigestUpdate(new_ctx->ctx, data.data, data.size) != 1)
         assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_DigestUpdate failed"));
 
@@ -252,7 +302,15 @@ ERL_NIF_TERM hash_final_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_get_resource(env, argv[0], evp_md_ctx_rtype, (void**)&ctx))
         return EXCP_BADARG_N(env, 0, "Bad state");
 
+#ifdef HAS_AWSLC
+    /* AWS-LC has no default output length for SHAKE, see hash_nif() */
+    if (ctx->xof_default_length != 0)
+        ret_size = ctx->xof_default_length;
+    else
+        ret_size = (unsigned)EVP_MD_CTX_size(ctx->ctx);
+#else
     ret_size = (unsigned)EVP_MD_CTX_size(ctx->ctx);
+#endif
     ASSERT(0 < ret_size && ret_size <= EVP_MAX_MD_SIZE);
 
     if ((new_ctx = EVP_MD_CTX_new()) == NULL)
@@ -261,10 +319,21 @@ ERL_NIF_TERM hash_final_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_MD_CTX_copy failed"));
     if ((outp = enif_make_new_binary(env, ret_size, &ret)) == NULL)
         assign_goto(ret, done, EXCP_ERROR(env, "Can't make a new binary"));
+#ifdef HAS_AWSLC
+    if (ctx->xof_default_length != 0) {
+        if (EVP_DigestFinalXOF(new_ctx, outp, ret_size) != 1)
+            assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_DigestFinalXOF failed"));
+    } else {
+        if (EVP_DigestFinal(new_ctx, outp, &ret_size) != 1)
+            assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_DigestFinal failed"));
+        ASSERT(ret_size == (unsigned)EVP_MD_CTX_size(ctx->ctx));
+    }
+#else
     if (EVP_DigestFinal(new_ctx, outp, &ret_size) != 1)
         assign_goto(ret, done, EXCP_ERROR(env, "Low-level call EVP_DigestFinal failed"));
 
     ASSERT(ret_size == (unsigned)EVP_MD_CTX_size(ctx->ctx));
+#endif
 
  done:
     if (new_ctx)
