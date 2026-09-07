@@ -34,8 +34,8 @@ ERL_NIF_TERM ng_crypto_one_time(ErlNifEnv* env, int argc, const ERL_NIF_TERM arg
 /*************************************************************************/
 /* Compatibility functions.                                              */
 /*************************************************************************/
-#ifdef HAVE_ECB_IVEC_BUG
-    /* <= 0.9.8l returns faulty ivec length */
+#if defined(HAVE_ECB_IVEC_BUG) || defined(HAS_AWSLC)
+    /* <= 0.9.8l and AWS-LC (BF-ECB) return faulty ivec length */
 # define GET_IV_LEN(Ciph) ((Ciph)->flags & ECB_BUG_0_9_8L) ? 0 : EVP_CIPHER_iv_length((Ciph)->cipher.p)
 #else
 # define GET_IV_LEN(Ciph) EVP_CIPHER_iv_length((Ciph)->cipher.p)

@@ -57,7 +57,7 @@
 /* NIF interface declarations */
 static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info);
 static int upgrade(ErlNifEnv* env, void** priv_data, void** old_priv_data, ERL_NIF_TERM load_info);
-#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,0) && !defined(HAS_LIBRESSL)
+#ifdef HAVE_OPENSSL_THREAD_STOP
 static void unload_thread(void* priv_data);
 #endif
 static void unload(ErlNifEnv* env, void* priv_data);
@@ -249,7 +249,7 @@ static int initialize(ErlNifEnv* env, ERL_NIF_TERM load_info)
         ret = __LINE__; goto done;
     }
 
-#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,0) && !defined(HAS_LIBRESSL)
+#ifdef HAVE_OPENSSL_THREAD_STOP
     enif_set_option(env, ERL_NIF_OPT_ON_UNLOAD_THREAD, unload_thread);
 #endif
 
@@ -384,7 +384,7 @@ static int upgrade(ErlNifEnv* env, void** priv_data, void** old_priv_data,
     return 0;
 }
 
-#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,0) && !defined(HAS_LIBRESSL)
+#ifdef HAVE_OPENSSL_THREAD_STOP
 static void unload_thread(void* priv_data)
 {
     if (library_refc == 1) {
@@ -411,4 +411,3 @@ static void unload(ErlNifEnv* env, void* priv_data)
          */
     }
 }
-

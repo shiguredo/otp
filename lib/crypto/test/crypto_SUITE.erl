@@ -1386,16 +1386,16 @@ crypto_enc_test(Bin, AAD, Cnt) ->
 %%--------------------------------------------------------------------
 encapsulate(_Config) ->
     case openssl_version() of
-        V when V < {3,5,0} ->
-            {skip, "Requires OpenSSL 3.5 "};
-        _ ->
+        V when is_tuple(V), V >= {3,5,0} ->
             KEM_algs = [mlkem512, mlkem768, mlkem1024],
             Supported = crypto:supports(kems),
             [begin
                  true = lists:member(Alg, Supported),
                  encap_decap(Alg)
              end || Alg <- KEM_algs],
-            ok
+            ok;
+        _ ->
+            {skip, "Requires OpenSSL 3.5 "}
     end.
 
 encap_decap(Alg) ->
@@ -1410,16 +1410,16 @@ encap_decap(Alg) ->
 %%--------------------------------------------------------------------
 sign_verify_oqs(_Config) ->
     case openssl_version() of
-        V when V < {3,5,0} ->
-            {skip, "Requires OpenSSL 3.5"};
-        _ ->
+        V when is_tuple(V), V >= {3,5,0} ->
             Supported = crypto:supports(public_keys),
             [begin
                  true = lists:member(Alg, Supported),
                  sign_verify_oqs_do(Alg)
              end
              || Alg <- quantum_sign_ciphers()],
-            ok
+            ok;
+        _ ->
+            {skip, "Requires OpenSSL 3.5"}
     end.
 
 sign_verify_oqs_do(Alg) ->
@@ -1674,17 +1674,12 @@ info(_Config) ->
             ok;
 
         %% Version strings in header vs lib seen to differ slightly on SUSE
-        %% but OpenSSL version numbers should be the same
+        %% but the version numbers should be the same
         #{cryptolib_version_compiled := CompVer,
           cryptolib_version_linked := LibVer,
           compile_type := Tc,
           link_type := Tl} when is_atom(Tc), is_atom(Tl) ->
-            RE = "OpenSSL (\\d+\\.\\d+\\.\\d+.)",
-            Opts = [{capture,first,list}],
-            {match,[CompV]} = re:run(CompVer, RE, Opts),
-            {match,[LinkV]} = re:run(LibVer, RE, Opts),
-            {CompV,CompV} = {CompV,LinkV},
-            ok;
+            crypto_versions_match(CompVer, LibVer);
 
         Other ->
             ct:log("LibVer = ~p~ncrypto:info() -> ~p", [LibVer,Other]),
@@ -1693,6 +1688,25 @@ info(_Config) ->
         C:E ->
             ct:log("Exception ~p:~p", [C,E]),
             ct:fail("Exception when calling crypto:info/0", [])
+    end.
+
+%% Compares the versions of the header and the linked cryptolib. The AWS-LC
+%% project reports itself as "OpenSSL 1.1.1 (compatible; AWS-LC X.Y.Z)" in the
+%% header and "AWS-LC X.Y.Z" from the linked library.
+crypto_versions_match(CompVer, LibVer) ->
+    Opts = [{capture,first,list}],
+    Patterns = ["OpenSSL (\\d+\\.\\d+\\.\\d+.)",
+                "AWS-LC (\\d+\\.\\d+\\.\\d+)"],
+    crypto_versions_match(Patterns, CompVer, LibVer, Opts).
+
+crypto_versions_match([], CompVer, LibVer, _Opts) ->
+    ct:fail("Version mismatch: ~p vs ~p", [CompVer, LibVer]);
+crypto_versions_match([RE | Rest], CompVer, LibVer, Opts) ->
+    case {re:run(CompVer, RE, Opts), re:run(LibVer, RE, Opts)} of
+        {{match,[CompV]}, {match,[LinkV]}} when CompV =:= LinkV ->
+            ok;
+        _ ->
+            crypto_versions_match(Rest, CompVer, LibVer, Opts)
     end.
 
 %%--------------------------------------------------------------------
@@ -1781,8 +1795,11 @@ hash_info() ->
 hash_info(Config) when is_list(Config) ->
     #{type := _,size := _,block_size := _} = crypto:hash_info(sha256),
     {'EXIT',_} = (catch crypto:hash_info(not_a_hash)),
-    lists:foreach(fun(H) -> crypto:hash_info(H) end,
-        proplists:get_value(hashs, crypto:supports())).
+    lists:foreach(fun(H) ->
+                          #{size := Size} = crypto:hash_info(H),
+                          Size = byte_size(crypto:hash(H, <<"abc">>))
+                  end,
+                  proplists:get_value(hashs, crypto:supports())).
 
 %%--------------------------------------------------------------------
 %% Internal functions ------------------------------------------------
@@ -2796,6 +2813,15 @@ gen_rsa_sign_verify_tests(Hashs, Msg, Public, Private, Opts) ->
 			    orelse Hash =:= ripemd160
 			    orelse Hash =:= sha224 ->
 			Acc1;
+		    ([{rsa_padding, rsa_x931_padding} | _]=Opt, Acc1) ->
+                        %% X9.31 padding is not supported by all cryptolibs
+                        %% (e.g. AWS-LC), check crypto:supports/1
+                        case rsa_opt_is_supported(Opt, SupOpts) of
+                            true ->
+                                [{rsa, Hash, Public, Private, Msg, Opt} | Acc1];
+                            false ->
+                                Acc1
+                        end;
 		    (Opt, Acc1) ->
                         case rsa_opt_is_supported(Opt, SupOpts) of
                             true ->
@@ -5461,6 +5487,8 @@ openssl_version() ->
         [{<<"OpenSSL">>,Ver,<<"OpenSSL",_/binary>>}] ->
             <<Maj,Min,Patch>> = <<(Ver bsr 12):24/integer>>,
             {Maj,Min,Patch};
+        [{<<"OpenSSL">>,_Ver,<<"AWS-LC",_/binary>>}] ->
+            awslc;
         _ ->
             undefined
     end.

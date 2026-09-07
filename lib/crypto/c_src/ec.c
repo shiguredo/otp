@@ -668,8 +668,13 @@ static EC_KEY* ec_key_new(ErlNifEnv* env, ERL_NIF_TERM curve_arg, size_t *size)
         goto err;
 
     if (enif_inspect_binary(env, prime[2], &seed)) {
+        /* AWS-LC: EC_GROUP_set_seed() is a deprecated no-op that always
+         * returns 0, so treating failure as fatal would reject all seeded
+         * curves. Seed is unused by cryptographic methods anyway. */
+#ifndef HAS_AWSLC
         if (!EC_GROUP_set_seed(group, seed.data, seed.size))
             goto err;
+#endif
     }
 
     if (!term2point(env, curve[2], group, &point))
@@ -685,7 +690,11 @@ static EC_KEY* ec_key_new(ErlNifEnv* env, ERL_NIF_TERM curve_arg, size_t *size)
     if (!EC_GROUP_set_generator(group, point, bn_order, cofactor))
         goto err;
 
+#ifndef HAS_AWSLC
+    /* AWS-LC does not support serialization of explicit curve parameters
+     * and EC_GROUP_set_asn1_flag() is a no-op there. */
     EC_GROUP_set_asn1_flag(group, 0x0);
+#endif
 
     if ((key = EC_KEY_new()) == NULL)
         goto err;
@@ -732,8 +741,13 @@ int term2point(ErlNifEnv* env, ERL_NIF_TERM term, EC_GROUP *group, EC_POINT **pp
     if ((point = EC_POINT_new(group)) == NULL)
         goto err;
 
-    /* set the point conversion form */
+#ifndef HAS_AWSLC
+    /* set the point conversion form. AWS-LC's EC_GROUP_set_point_conversion_form()
+     * only affects metadata of mutable groups, which is not used when encoding
+     * points (an explicit form is always passed to EC_POINT_point2oct()), so the
+     * deprecated call is skipped there. */
     EC_GROUP_set_point_conversion_form(group, (point_conversion_form_t)(bin.data[0] & ~0x01));
+#endif
 
     /* extract the ec point */
     if (!EC_POINT_oct2point(group, point, bin.data, bin.size, NULL))

@@ -32,6 +32,11 @@
 # define HAS_LIBRESSL_VSN 0
 #endif
 
+/* Defined by AWS-LC in <openssl/base.h>. */
+#ifdef OPENSSL_IS_AWSLC
+# define HAS_AWSLC
+#endif
+
 /* Helper macros to construct a OPENSSL_VERSION_NUMBER.
  * See openssl/opensslv.h
  */

@@ -27,6 +27,22 @@
 #define NOT_AEAD {{0,0,0}}
 #define AEAD_CTRL {{EVP_CTRL_AEAD_SET_IVLEN,EVP_CTRL_AEAD_GET_TAG,EVP_CTRL_AEAD_SET_TAG}}
 
+#ifdef HAS_AWSLC
+/*
+ * AWS-LC reports a faulty IV length for BF-ECB (8 bytes although ECB mode
+ * has no IV). Report 0 like OpenSSL does.
+ */
+static int cipher_iv_length(const EVP_CIPHER *cipher)
+{
+    if (EVP_CIPHER_mode(cipher) == EVP_CIPH_ECB_MODE)
+        return 0;
+    return EVP_CIPHER_iv_length(cipher);
+}
+# define CIPHER_IV_LENGTH(Cipher) cipher_iv_length(Cipher)
+#else
+# define CIPHER_IV_LENGTH(Cipher) EVP_CIPHER_iv_length(Cipher)
+#endif
+
 static struct cipher_type_t cipher_types[] =
 {
 #ifdef HAVE_RC2
@@ -43,7 +59,11 @@ static struct cipher_type_t cipher_types[] =
 
 #ifdef HAVE_DES
     {{"des_cbc"}, "des-cbc", {&EVP_des_cbc},  0, NO_FIPS_CIPHER},
+# ifdef HAVE_DES_CFB8
     {{"des_cfb"}, "des-cfb", {&EVP_des_cfb8}, 0, NO_FIPS_CIPHER},
+# else
+    {{"des_cfb"}, "des-cfb", {NULL}, 0, 0},
+# endif
     {{"des_ecb"}, "des-ecb", {&EVP_des_ecb},  0, NO_FIPS_CIPHER | ECB_BUG_0_9_8L},
 #else
     {{"des_cbc"}, "des-cbc", {NULL}, 0, 0},
@@ -289,7 +309,7 @@ ERL_NIF_TERM cipher_info_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
     keys[1] = atom_key_length;
     vals[1] = enif_make_int(env, EVP_CIPHER_key_length(cipher));
     keys[2] = atom_iv_length;
-    vals[2] = enif_make_int(env, EVP_CIPHER_iv_length(cipher));
+    vals[2] = enif_make_int(env, CIPHER_IV_LENGTH(cipher));
     keys[3] = atom_block_size;
     vals[3] = enif_make_int(env, EVP_CIPHER_block_size(cipher));
     keys[4] = atom_prop_aead;

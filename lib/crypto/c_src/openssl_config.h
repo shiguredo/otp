@@ -58,6 +58,60 @@
 # include <openssl/provider.h>
 #endif
 
+/* AWS-LC compatibility shims (verified against AWS-LC 5.9.0 and 5.10.0).
+ * - CCM ctrl codes: AWS-LC 5.8.0 only has EVP_CTRL_CCM_SET_L; map the rest to
+ *   the AEAD controls (AWS-LC 5.9.0 and later define the aliases itself, so
+ *   these shims become no-ops then).
+ * - EVP_CIPHER_type(): absent; provide the same normalization as OpenSSL.
+ * - OPENSSL_ECC_MAX_FIELD_BITS: absent; use OpenSSL's value (661).
+ * - EVP_PKEY_CMAC: absent; NID_cmac exists and is used by the MAC table
+ *   (OpenSSL defines EVP_PKEY_CMAC as NID_cmac as well).
+ * BN_FLG_CONSTTIME is defined as 0 by AWS-LC itself (a no-op), so srp.c uses
+ * BN_mod_exp_mont_consttime() explicitly for AWS-LC instead of the flag.
+ */
+#ifdef HAS_AWSLC
+# ifndef EVP_CTRL_CCM_SET_IVLEN
+#  define EVP_CTRL_CCM_SET_IVLEN EVP_CTRL_AEAD_SET_IVLEN
+# endif
+# ifndef EVP_CTRL_CCM_GET_TAG
+#  define EVP_CTRL_CCM_GET_TAG EVP_CTRL_AEAD_GET_TAG
+# endif
+# ifndef EVP_CTRL_CCM_SET_TAG
+#  define EVP_CTRL_CCM_SET_TAG EVP_CTRL_AEAD_SET_TAG
+# endif
+/* EVP_CIPHER_nid() is not a drop in replacement for EVP_CIPHER_type():
+ * OpenSSL returns NID_undef for ciphers without an ASN.1 type (CTR mode,
+ * Blowfish ECB/CFB/OFB, ChaCha20-Poly1305) and the CFB NID for CFB8 mode. */
+static inline int otp_aws_lc_evp_cipher_type(const EVP_CIPHER *cipher)
+{
+    switch (EVP_CIPHER_nid(cipher)) {
+    case NID_aes_128_ctr:
+    case NID_aes_192_ctr:
+    case NID_aes_256_ctr:
+    case NID_bf_ecb:
+    case NID_bf_cfb64:
+    case NID_bf_ofb64:
+    case NID_chacha20_poly1305:
+        return NID_undef;
+    case NID_aes_128_cfb8:
+        return NID_aes_128_cfb128;
+    case NID_aes_192_cfb8:
+        return NID_aes_192_cfb128;
+    case NID_aes_256_cfb8:
+        return NID_aes_256_cfb128;
+    default:
+        return EVP_CIPHER_nid(cipher);
+    }
+}
+# define EVP_CIPHER_type(cipher) otp_aws_lc_evp_cipher_type(cipher)
+# ifndef OPENSSL_ECC_MAX_FIELD_BITS
+#  define OPENSSL_ECC_MAX_FIELD_BITS 661
+# endif
+# ifndef EVP_PKEY_CMAC
+#  define EVP_PKEY_CMAC NID_cmac
+# endif
+#endif
+
 /* LibreSSL was cloned from OpenSSL 1.0.1g and claims to be API and BPI compatible
  * with 1.0.1.
  *
@@ -108,6 +162,11 @@
 #ifndef HAS_LIBRESSL
 # if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,0)
 #  define HAS_BN_bn2binpad
+/* AWS-LC does not provide OPENSSL_thread_stop (thread-local cleanup is
+ * handled inside the library). */
+#  ifndef HAS_AWSLC
+#   define HAVE_OPENSSL_THREAD_STOP
+#  endif
 # endif
 #endif
 
@@ -119,7 +178,11 @@
 
 # if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,1)
 #   define HAVE_PKEY_new_raw_private_key
+/* AWS-LC does not provide EVP_PKEY_new_CMAC_key; CMAC uses CMAC_* via
+ * cmac.c when this is undefined. */
+#  ifndef HAS_AWSLC
 #   define HAVE_EVP_PKEY_new_CMAC_key
+#  endif
 #   define HAVE_DigestSign_as_single_op
 # endif
 #endif
@@ -158,7 +221,10 @@
 #endif
 
 
-#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,0)
+/* AWS-LC's public modes.h only exposes CRYPTO_cts128_*. CRYPTO_gcm128_*
+ * is internal-only, and OTP only needs it for HAVE_GCM_EVP_DECRYPT_BUG
+ * (OpenSSL < 1.0.1d), which does not apply to AWS-LC. */
+#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,0) && !defined(HAS_AWSLC)
 #include <openssl/modes.h>
 #endif
 
@@ -247,7 +313,10 @@
 #ifndef OPENSSL_NO_DES
 # define HAVE_DES
 
-# if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(0,9,7,'e')
+/* AWS-LC provides EVP_des_cbc/ecb/ede* but not EVP_des_cfb8 /
+ * EVP_des_ede3_cfb8. */
+# if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(0,9,7,'e') && !defined(HAS_AWSLC)
+#  define HAVE_DES_CFB8
 #  define HAVE_DES_ede3_cfb
 # endif
 
@@ -298,6 +367,7 @@
 // (test for >= 1.1.1pre8)
 #if OPENSSL_VERSION_NUMBER >= (PACKED_OPENSSL_VERSION_PLAIN(1,1,1) -7) \
     && !defined(HAS_LIBRESSL) \
+    && !defined(HAS_AWSLC) \
     && defined(HAVE_EC)
 # ifdef HAVE_DH
 #   define HAVE_X25519
@@ -307,6 +377,14 @@
 #   define HAVE_ED25519
 #   define HAVE_ED448
 # endif
+#endif
+
+/* AWS-LC defines EVP_PKEY_ED448/X448 for OpenSSL compatibility, but key
+ * creation fails. Enable only Ed25519/X25519. AWS-LC does not define
+ * OPENSSL_NO_DH, so HAVE_DH is always set here. */
+#if defined(HAS_AWSLC) && defined(HAVE_EC)
+# define HAVE_X25519
+# define HAVE_ED25519
 #endif
 
 #if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,1)
@@ -335,18 +413,23 @@
 # endif
 #endif
 
+/* AWS-LC provides EVP_chacha20_poly1305 and CRYPTO_chacha_20, but not
+ * the EVP_chacha20 stream-cipher wrapper that OTP registers. */
 #if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(1,1,0,'d')
 # ifndef HAS_LIBRESSL
 #  ifndef OPENSSL_NO_CHACHA
+#   ifndef HAS_AWSLC
 #    define HAVE_CHACHA20
+#   endif
 #  endif
 # endif
 #endif
 
 // OPENSSL_VERSION_NUMBER >= 1.1.1-pre8
+/* AWS-LC provides CRYPTO_poly1305_* but not EVP_PKEY_POLY1305. */
 #if OPENSSL_VERSION_NUMBER >= (PACKED_OPENSSL_VERSION_PLAIN(1,1,1)-7)
 # ifndef HAS_LIBRESSL
-#  if !defined(OPENSSL_NO_POLY1305)
+#  if !defined(OPENSSL_NO_POLY1305) && !defined(HAS_AWSLC)
 #    define HAVE_POLY1305
 #  endif
 # endif
