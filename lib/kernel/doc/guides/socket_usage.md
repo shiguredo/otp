@@ -45,11 +45,12 @@ and [`sendto/4,5`](`m:socket#sendto-nowait`)). This is achieved by setting the
 `recv(Sock, 0, nowait)`) when there is actually nothing to read, it will return
 with:
 
-- **On Unix** - `{select, `[`SelectInfo`](`t:socket:select_info/0`)`}`
+- **With a select I/O backend (Unix)** -
+  `{select, `[`SelectInfo`](`t:socket:select_info/0`)`}`
 
   `SelectInfo` contains the [`SelectHandle`](`t:socket:select_handle/0`).
 
-- **On Windows** -
+- **With a completion I/O backend (Windows, and Linux with io_uring)** -
   `{completion, `[`CompletionInfo`](`t:socket:completion_info/0`)`}`
 
   `CompletionInfo` contains the
@@ -58,7 +59,8 @@ with:
 When data eventually arrives a 'select' or 'completion' message will be sent to
 the caller:
 
-- **On Unix** - `{'$socket', socket(), select, SelectHandle}`
+- **With a select I/O backend (Unix)** -
+  `{'$socket', socket(), select, SelectHandle}`
 
   The caller can then make another call to the recv function and now expect
   data.
@@ -67,10 +69,12 @@ the caller:
   the function (recv in this case). So either immediately call the function or
   [`cancel`](`socket:cancel/2`).
 
-- **On Windows** -
+- **With a completion I/O backend (Windows, and Linux with io_uring)** -
   `{'$socket', socket(), completion, {CompletionHandle, CompletionStatus}}`
 
   The `CompletionStatus` contains the result of the operation (read).
+
+See [I/O backends](#i-o-backends) for which I/O backend is used.
 
 The user must also be prepared to receive an abort message:
 
@@ -99,6 +103,42 @@ The `select_handle()` is the same as was returned in the
 
 The `completion_handle()` is the same as was returned in the
 [`CompletionInfo`](`t:socket:completion_info/0`).
+
+## I/O backends
+
+The operations of the socket interface are performed by an _I/O backend_.
+Which one is used can be seen with [`socket:info/0`](`socket:info/0`)
+(the `name` of the `io_backend`):
+
+- **`unix_essio`** - The (default) Unix backend. An operation that would block
+  is _select:ed_ (a select message is sent when the operation can be retried).
+
+- **`win_esaio`** - The Windows backend (I/O Completion Ports). An operation
+  that would block is performed asynchronously, and the result is delivered in
+  a completion message.
+
+- **`linux_esuio`** - The Linux io_uring backend. An operation is first tried
+  directly (exactly as with `unix_essio`), and only if it would block is it
+  handed over to io_uring. The result is then delivered in a completion message
+  (exactly as with `win_esaio`).
+
+The io_uring backend is built (on Linux) when the kernel headers support it
+(Linux 6.1 or later), and can be controlled with the configure options:
+
+```text
+--enable-esock-io-uring (default if available) | --disable-esock-io-uring
+```
+
+It is only used when it is asked for, by setting the environment variable
+`ESOCK_IO_BACKEND` to `io_uring` before starting the erlang (for example
+`erl -env ESOCK_IO_BACKEND io_uring`). The number of rings (each with its own
+thread) can be set with the environment variable `ESOCK_IO_NUM_THREADS`
+(the default is the number of schedulers).
+
+If io_uring can not be used (for instance, if it has been disabled with the
+sysctl `kernel.io_uring_disabled` or by a seccomp filter, as in some container
+runtimes), the default backend (`unix_essio`) is used instead, and the reason
+is reported (as `io_uring => {error, Reason}`) in the `io_backend` info.
 
 ## Socket Registry
 
