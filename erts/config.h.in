@@ -99,6 +99,9 @@
 /* Enable esock */
 #undef ESOCK_ENABLE
 
+/* Define if the esock io_uring I/O backend should be built */
+#undef ESOCK_HAVE_IO_URING
+
 /* SCTP flag DATA-SENT defined */
 #undef ESOCK_SCTP_DATA_SENT
 

@@ -1518,6 +1518,54 @@ dnl ESOCK_COUNTER_SIZE=$with_esock_counter_size
 dnl We don't actually (currently) use this in erlang
 dnl AC_SUBST(ESOCK_COUNTER_SIZE)
 
+
+dnl *** ESOCK_HAVE_IO_URING ***
+dnl The io_uring based (completion) I/O backend (esuio) is only built
+dnl on Linux. We only do compile checks here (so that cross builds
+dnl keep working); whether the running kernel actually allows io_uring
+dnl is checked when the nif is loaded, and if not we fall back to the
+dnl default (select) backend.
+
+AC_ARG_ENABLE(esock-io-uring,
+AS_HELP_STRING([--enable-esock-io-uring],
+               [build the io_uring based socket I/O backend (Linux only, default if available)])
+AS_HELP_STRING([--disable-esock-io-uring],
+               [do not build the io_uring based socket I/O backend]),
+  [ case "$enableval" in
+    no) enable_esock_io_uring=no ;;
+    *)  enable_esock_io_uring=yes ;;
+  esac ],
+  enable_esock_io_uring=auto)
+
+ESOCK_IO_URING=no
+AS_IF([test "x$enable_esock" = "xyes" && test "x$enable_esock_io_uring" != "xno"],
+  [
+    AC_CACHE_CHECK([for io_uring support usable by esock],
+                   erts_cv_esock_io_uring,
+      [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include <linux/io_uring.h>
+#include <sys/syscall.h>
+          ]], [[
+long nr = __NR_io_uring_setup + __NR_io_uring_enter + __NR_io_uring_register;
+unsigned setup = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+                 IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+unsigned misc = IORING_REGISTER_PBUF_RING + IORING_RECV_MULTISHOT +
+                IORING_ASYNC_CANCEL_FD + IORING_ASYNC_CANCEL_ALL +
+                IORING_POLL_ADD_MULTI + IORING_ENTER_EXT_ARG;
+int op = IORING_OP_SEND_ZC;
+(void) nr; (void) setup; (void) misc; (void) op;
+          ]])],
+        [erts_cv_esock_io_uring=yes],
+        [erts_cv_esock_io_uring=no])])
+    AS_IF([test "$erts_cv_esock_io_uring" = "yes"],
+          [ESOCK_IO_URING=yes
+           AC_DEFINE(ESOCK_HAVE_IO_URING, [1],
+                     [Define if the esock io_uring I/O backend should be built])],
+          [test "x$enable_esock_io_uring" = "xyes"],
+          [AC_MSG_ERROR([--enable-esock-io-uring given but no usable io_uring support was found])])
+  ])
+AC_SUBST(ESOCK_IO_URING)
+
 dnl Checks for the net nif
 AC_CHECK_FUNC([if_nametoindex],
               [AC_DEFINE(HAVE_IF_NAMETOINDEX, [1],

@@ -357,6 +357,10 @@ Some of the available `configure` options are:
 *   `--{enable,disable}-jit` - Force enabling or disabling of the JIT.
 *   `--{enable,disable}-kernel-poll` - Kernel poll support (enabled by
     default if possible)
+*   `--{enable,disable}-esock-io-uring` - Build the io_uring based I/O
+    backend of the `socket` module (Linux only, enabled by default if
+    possible). It is used when the environment variable `ESOCK_IO_BACKEND`
+    is set to `io_uring` (see the Socket Usage User's Guide).
 *   `--enable-m64-build` - Build 64-bit binaries using the `-m64` flag to
     `(g)cc`
 *   `--enable-m32-build` - Build 32-bit binaries using the `-m32` flag to
