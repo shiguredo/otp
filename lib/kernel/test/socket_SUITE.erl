@@ -496,6 +496,10 @@ init_per_suite(Config0) ->
        "~n      Config: ~p"
        "~n      Nodes:  ~p", [Config0, erlang:nodes()]),
     
+    %% If the io_uring backend was requested, we must have it
+    %% (and not have silently fallen back to the default backend).
+    ok = socket_test_lib:ensure_requested_io_backend(),
+
     try socket:info() of
         #{load_nif_result := ok} ->
 	    ?P("~s -> socket nif loaded", [?FUNCTION_NAME]),
@@ -10572,6 +10576,17 @@ do_ioctl_get_gifdstaddr(_State) ->
                         i("select info - attempt complete connection"),
                         ok = socket:connect(CSock),
                         {ok, AS}
+                end;
+            {completion,
+             {completion_info, _Tag, CompletionHandle} = _CompletionInfo} ->
+                i("completion - attempt accept"),
+                {ok, AS} = socket:accept(LSock),
+
+                i("await connection ready"),
+                receive
+                    {'$socket', CSock, completion, {CompletionHandle, ok}} ->
+                        i("connection completed"),
+                        {ok, AS}
                 end
         end,
 
@@ -10688,6 +10703,17 @@ do_ioctl_get_gifbrdaddr(_State) ->
                     {'$socket', CSock, select, SelectHandle} ->
                         i("select info - attempt complete connection"),
                         ok = socket:connect(CSock),
+                        {ok, AS}
+                end;
+            {completion,
+             {completion_info, _Tag, CompletionHandle} = _CompletionInfo} ->
+                i("completion - attempt accept"),
+                {ok, AS} = socket:accept(LSock),
+
+                i("await connection ready"),
+                receive
+                    {'$socket', CSock, completion, {CompletionHandle, ok}} ->
+                        i("connection completed"),
                         {ok, AS}
                 end
         end,
@@ -12170,7 +12196,8 @@ otp18635(Config) when is_list(Config) ->
     ?TT(?SECS(10)),
     tc_try(?FUNCTION_NAME,
            fun() ->
-                   is_not_windows(),
+                   %% The test expects an accept (nowait) to select
+                   is_select_backend(),
                    has_support_ipv4()
            end,
            fun() ->
@@ -14618,6 +14645,14 @@ is_not_windows() ->
             ok
     end.
 
+is_select_backend() ->
+    case socket_test_lib:is_select_backend() of
+        true ->
+            ok;
+        false ->
+            skip("Requires a select based I/O backend")
+    end.
+
 is_windows() ->
     case os:type() of
         {win32, nt} ->
@@ -15549,8 +15584,11 @@ recvmmsg_select_nowait_udp4(_Config) when is_list(_Config) ->
             {ok, Addr} = inet:getaddr("localhost", inet),
             ok = socket:bind(S, #{family => inet, addr => Addr, port => 0}),
             %% Call recvmmsg with nowait on empty socket - should get select
+            %% (or completion, with a completion based I/O backend)
             case socket:recvmmsg(S, 10, 0, 0, [], nowait) of
                 {select, {select_info, recvmmsg, _SelectHandle}} ->
+                    ok;
+                {completion, {completion_info, recvmmsg, _CompletionHandle}} ->
                     ok;
                 {error, timeout} ->
                     %% Also acceptable on some platforms
@@ -15626,6 +15664,9 @@ sendmmsg_select_nowait_udp4(_Config) when is_list(_Config) ->
                 ok ->
                     ok;
                 {select, {select_info, sendmmsg, _SelectHandle}} ->
+                    %% Socket buffer might be full (unlikely but possible)
+                    ok;
+                {completion, {completion_info, sendmmsg, _CompletionHandle}} ->
                     %% Socket buffer might be full (unlikely but possible)
                     ok;
                 Other ->
@@ -15922,7 +15963,20 @@ sendmmsg_full_tcp4() ->
     {ok, R} = socket:accept(L),
     Payload = <<0:(16 * 1024 * 1024 * 8)>>,
     {error, {timeout, _}} = socket:send(S, Payload, [], 100),
+    %% Make sure that not even one more byte fits. When the send above
+    %% times out, there may still be some room left (the kernel only
+    %% signals writable when there is "enough" room, and a completion
+    %% based backend (io_uring) waits for that in the kernel).
+    ok = sendmmsg_fill_tcp4(S),
     {L, S, R}.
+
+sendmmsg_fill_tcp4(S) ->
+    case socket:send(S, <<0>>, [], 0) of
+        ok ->
+            sendmmsg_fill_tcp4(S);
+        {error, timeout} ->
+            ok
+    end.
 
 %% Spawn a process doing a sendmmsg with infinity timeout on a full
 %% socket and verify that it blocks. The process reports its result

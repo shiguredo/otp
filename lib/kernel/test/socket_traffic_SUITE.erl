@@ -355,6 +355,10 @@ init_per_suite(Config0) ->
        "~n      Config: ~p"
        "~n      Nodes:  ~p", [Config0, erlang:nodes()]),
     
+    %% If the io_uring backend was requested, we must have it
+    %% (and not have silently fallen back to the default backend).
+    ok = socket_test_lib:ensure_requested_io_backend(),
+
     try socket:info() of
         #{load_nif_result := ok} ->
 	    ?P("~s -> socket nif loaded", [?FUNCTION_NAME]),

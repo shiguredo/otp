@@ -676,6 +676,10 @@ init_per_suite(Config0) ->
        "~n      Config: ~p"
        "~n      Nodes:  ~p", [?FUNCTION_NAME, Config0, erlang:nodes()]),
     
+    %% If the io_uring backend was requested, we must have it
+    %% (and not have silently fallen back to the default backend).
+    ok = socket_test_lib:ensure_requested_io_backend(),
+
     try socket:info() of
         #{load_nif_result := ok} ->
 	    ?P("~s -> socket nif loaded", [?FUNCTION_NAME]),
@@ -21694,6 +21698,29 @@ api_opt_recverr_udp(Config, InitState) ->
                                                [Reason]),
                                    ERROR
 
+                           end;
+                      (#{sent        := true,
+                         asynch_tag  := completion,
+                         sock        := Sock,
+                         rcompletion := {completion_info, _, Ref}} = _State) ->
+                           %% The send completed directly, but the (async)
+                           %% read is in progress (io_uring); it gets the
+                           %% error.
+                           receive
+                               {'$socket', Sock, completion,
+                                {Ref, {error, econnrefused = Reason}}} ->
+                                   ?SEV_IPRINT("expected failure: ~p",
+                                               [Reason]),
+                                   ok;
+                               {'$socket', Sock, completion,
+                                {Ref, {ok, _}}} ->
+                                   ?SEV_EPRINT("unexpected success"),
+                                   {error, unexpected_success};
+                               {'$socket', Sock, completion,
+                                {Ref, {error, Reason} = ERROR}} ->
+                                   ?SEV_IPRINT("unexpected failure: ~p",
+                                               [Reason]),
+                                   ERROR
                            end;
                       (#{sent := true} = _State) ->
                            ?SEV_IPRINT("no action needed"),

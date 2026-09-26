@@ -59,6 +59,12 @@
          has_support_sctp_peeloff/0,
          has_support_sctp_bindx/0,
 
+         %% I/O backend
+         io_backend_name/0,
+         is_select_backend/0,
+         is_completion_backend/0,
+         ensure_requested_io_backend/0,
+
           %% OS/Platform checks
          is_good_enough_platform/3,
          is_not_freebsd/0,
@@ -316,6 +322,47 @@ has_support_sctp_key(Key) when is_atom(Key) ->
     
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% The name of the (socket) I/O backend:
+%% unix_essio (select), win_esaio (completion) or linux_esuio (completion).
+io_backend_name() ->
+    try socket:info() of
+        #{io_backend := #{name := Name}} ->
+            Name;
+        _ ->
+            undefined
+    catch
+        error : _ ->
+            undefined
+    end.
+
+%% The "select" backend: the operations that would block return
+%% select (and a select message is sent when the operation can be
+%% retried).
+is_select_backend() ->
+    io_backend_name() =:= unix_essio.
+
+%% The "completion" backend: the operations that would block return
+%% completion (and the result is sent in a completion message).
+is_completion_backend() ->
+    lists:member(io_backend_name(), [win_esaio, linux_esuio]).
+
+%% When the io_uring backend has been requested (ESOCK_IO_BACKEND),
+%% we *must* have it; a silent fallback to the default backend would
+%% make the test run pointless.
+ensure_requested_io_backend() ->
+    case os:getenv("ESOCK_IO_BACKEND") of
+        "io_uring" ->
+            case io_backend_name() of
+                linux_esuio ->
+                    ok;
+                Other ->
+                    {error, {requested_io_uring, Other}}
+            end;
+        _ ->
+            ok
+    end.
+
 
 is_good_enough_platform(Family, Name, CondVsn) ->
     case os:type() of
