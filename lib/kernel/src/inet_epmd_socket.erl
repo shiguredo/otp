@@ -612,8 +612,10 @@ put_data(DistHandle, Packet) ->
 %% ------------------------------------------------------------
 supported() ->
     try socket:info() of
-	#{io_backend := #{name := BackendName}}
-          when (BackendName =/= win_esaio) ->
+        %% This module (currently) relies on the select based I/O backend
+        %% ({otp, select_read}); the completion based backends (win_esaio
+        %% and linux_esuio) are (temporarily) excluded.
+	#{io_backend := #{name := unix_essio}} ->
             ok;
         _ ->
             {skip, "Temporary exclusion"}

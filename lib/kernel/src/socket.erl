@@ -49,6 +49,10 @@ has been received.
 > `select` - based on the standard socket interface's
 > `select(3)`/`poll(3)` calls, and one on _Windows_: `completion` -
 > based on asynchronous I/O Completion Ports.
+> On _Linux_, the `completion` implementation can also be used,
+> based on io_uring (when selected with the environment variable
+> `ESOCK_IO_BACKEND=io_uring`, see the
+> [Socket Usage](socket_usage.md#i-o-backends) User's Guide).
 > The difference shows in the return values and message formats
 > because they have slightly different semantics.
 >
@@ -222,6 +226,8 @@ This module was introduced in OTP 22.0, as experimental code.
 * In OTP 29.0, (experimental) complete support for SCTP was added
   (functionally feature compatible with inet).
   Not (yet) supported for FreeBSD.
+* (experimental) An io_uring based (Linux) implementation of the
+  ([completion handle](`t:completion_handle/0`)) API was added.
 
 ## Examples
 
@@ -3766,8 +3772,12 @@ connect_deadline(SockRef, SockAddrOrAddrs, Deadline) ->
                 ?socket_msg(_Socket, abort, {Handle, Reason}) ->
                     {error, Reason}
             after Timeout ->
-                    _ = cancel(SockRef, connect, Handle),
-                    {error, timeout}
+                    case cancel_completion(SockRef, connect, Handle) of
+                        {completed, CompletionStatus} ->
+                            CompletionStatus;
+                        _ ->
+                            {error, timeout}
+                    end
             end;
         Result ->
             Result
@@ -3979,8 +3989,13 @@ accept_deadline(LSockRef, Deadline) ->
                 ?socket_msg(_Socket, abort, {AccRef, Reason}) ->
                     {error, Reason}
             after Timeout ->
-                    _ = cancel(LSockRef, accept, AccRef),
-                    {error, timeout}
+                    %% We may have accepted a connection anyway
+                    case cancel_completion(LSockRef, accept, AccRef) of
+                        {completed, CompletionStatus} ->
+                            CompletionStatus;
+                        _ ->
+                            {error, timeout}
+                    end
             end;
         Result ->
             accept_result(LSockRef, AccRef, Result)
@@ -4396,8 +4411,8 @@ send_common_deadline_result(
                     send_common_error(Reason, Data, false)
             after Timeout ->
                     %% ?DBG(['completion send timeout - cancel']),
-                    _ = cancel(SockRef, Op, Handle),
-                    send_common_error(timeout, Data, false)
+                    send_common_completion_timeout(
+                      SockRef, Op, Handle, Data, HasWritten)
             end;
 
         {completion, _} -> % ONLY FOR SENDV
@@ -4417,8 +4432,8 @@ send_common_deadline_result(
                     send_common_error(Reason, Data, false)
             after Timeout ->
 		    %% ?DBG(['completion send timeout - cancel']),
-                    _ = cancel(SockRef, Op, Handle),
-                    send_common_error(timeout, Data, false)
+                    send_common_completion_timeout(
+                      SockRef, Op, Handle, Data, HasWritten)
             end;
 
         {completion, RestData, _} -> % ONLY FOR SENDV
@@ -4438,8 +4453,8 @@ send_common_deadline_result(
                     send_common_error(Reason, RestData, false)
             after Timeout ->
 		    %% ?DBG(['completion send timeout - cancel']),
-                    _ = cancel(SockRef, Op, Handle),
-                    send_common_error(timeout, RestData, false)
+                    send_common_completion_timeout(
+                      SockRef, Op, Handle, RestData, true)
             end;
 
 	%%
@@ -4479,6 +4494,32 @@ send_common_deadline_result(
             Result
     end.
 
+
+%% A (completion) send timed out, cancel it.
+%% The send may have completed anyway, or (io_uring) may have sent
+%% part of the data before it was cancelled.
+send_common_completion_timeout(SockRef, Op, Handle, Data, HasWritten) ->
+    case cancel_completion(SockRef, Op, Handle) of
+        {completed, ok} ->
+            ok;
+        {completed, {ok, Written}} when is_integer(Written) ->
+            %% Only part of it (the rest is in the tail)
+            send_common_error(timeout, send_rest_data(Data, Written), true);
+        {completed, {error, _} = Error} ->
+            Error;
+        {cancelled, Written} when is_integer(Written), (0 < Written) ->
+            send_common_error(timeout, send_rest_data(Data, Written), true);
+        _ ->
+            send_common_error(timeout, Data, HasWritten)
+    end.
+
+send_rest_data(Bin, Written) when is_binary(Bin) ->
+    <<_:Written/binary, Rest/binary>> = Bin,
+    Rest;
+send_rest_data(IOV, Written) when is_list(IOV) ->
+    prim_socket:rest_iov(Written, IOV);
+send_rest_data(#{iov := IOV} = Msg, Written) ->
+    Msg#{iov := prim_socket:rest_iov(Written, IOV)}.
 
 send_common_error(Reason, Data, HasWritten) ->
     case HasWritten of
@@ -5179,6 +5220,24 @@ sendmmsg_deadline(SockRef, Msgs, Flags, Deadline) ->
             sendmmsg_deadline_select(SockRef, Msgs, Flags, Deadline, Handle);
         select ->
             sendmmsg_deadline_select(SockRef, Msgs, Flags, Deadline, Handle);
+        completion ->
+            %% The result (ok | {ok, RestIOVs} | {error, Reason})
+            %% will be delivered in a completion message.
+            Timeout = timeout(Deadline),
+            receive
+                ?socket_msg(?socket(SockRef), completion,
+                            {Handle, CompletionStatus}) ->
+                    CompletionStatus;
+                ?socket_msg(_Socket, abort, {Handle, Reason}) ->
+                    {error, Reason}
+            after Timeout ->
+                    case cancel_completion(SockRef, sendmmsg, Handle) of
+                        {completed, CompletionStatus} ->
+                            CompletionStatus;
+                        _ ->
+                            {error, timeout}
+                    end
+            end;
         ok ->
             ok;
         {ok, Partials, SentCount} ->
@@ -6024,6 +6083,7 @@ a receive operation is completed.
           {'select', {SelectInfo, Data}} |
           {'select_read', {SelectInfo, Data}} |
           {'completion', CompletionInfo} |
+          {'completion', {CompletionInfo, Data}} |
           {'error', Reason} when
       Socket         :: socket(),
       Length         :: non_neg_integer(),
@@ -6126,6 +6186,11 @@ recv_nowait(SockRef, Length, Flags, Handle) ->
             %% result) when the data arrives. *No* further action
             %% is required.
             {completion, ?COMPLETION_INFO(recv, Handle)};
+        {completion, Bin} ->
+            %% (io_uring) Stream with Length > 0: this is the data that
+            %% was available; the rest will be delivered in a
+            %% completion message.
+            {completion, {?COMPLETION_INFO(recv, Handle), Bin}};
         {Select, Bin} % New recv operation in progress
           when Select =:= select;        % Incomplete data
                Select =:= select_read -> % Final data
@@ -6210,59 +6275,14 @@ recv_deadline(SockRef, Length, Flags, Deadline, Buf) ->
         completion ->
             %% There is nothing just now, but we will be notified when the
             %% data has been read (with a completion message).
-            Timeout = timeout(Deadline),
-            receive
-                %% On Windows we are *always* done when we get {ok, Bin}
-                %% If we should/can read more, the result is {more, Bin}
-                ?socket_msg(?socket(SockRef), completion,
-                            {Handle, {ok, Bin}}) ->
-                    {ok, condense_buffer([Bin | Buf])};
-
-                %% Do we actually (currently) ever get this when Length =:= 0?
-                %% Future proofing?
-                %% This actually depends on the nif to stop reading
-                %% (stop returning 'more').
-                ?socket_msg(?socket(SockRef), completion,
-			    {Handle, {more, Bin}}) when (Length =:= 0) ->
-		    if
-			0 < Timeout ->
-			    %% Recv more
-			    recv_deadline(
-			      SockRef, Length, Flags,
-			      Deadline, [Bin | Buf]);
-			true ->
-			    {error, {timeout, condense_buffer([Bin | Buf])}}
-		    end;
-                %% We got the last chunk
-                ?socket_msg(?socket(SockRef), completion,
-			    {Handle, {more, Bin}})
-                  when (Length =:= byte_size(Bin)) ->
-                    {ok, condense_buffer([Bin | Buf])};
-
-                %% Just another chunk, but not the last
-                ?socket_msg(?socket(SockRef), completion,
-			    {Handle, {more, Bin}}) ->
-		    if
-			0 < Timeout ->
-			    %% Recv more
-			    recv_deadline(
-			      SockRef, Length - byte_size(Bin), Flags,
-			      Deadline, [Bin | Buf]);
-			true ->
-			    {error, {timeout, condense_buffer([Bin | Buf])}}
-		    end;
-
-                ?socket_msg(?socket(SockRef), completion,
-                            {Handle, {error, Reason}}) ->
-                    recv_error(Reason, Buf);
-
-                ?socket_msg(_Socket, abort, {Handle, Reason}) ->
-                    recv_error(Reason, Buf)
-
-            after Timeout ->
-                    _ = cancel(SockRef, recv, Handle),
-                    recv_error(timeout, Buf)
-            end;
+            recv_deadline_completion(
+              SockRef, Length, Flags, Deadline, Buf, Handle);
+        {completion, Bin} ->
+            %% (io_uring) Stream with Length > 0: part of the data now;
+            %% the rest will be delivered in a completion message.
+            recv_deadline_completion(
+              SockRef, Length - byte_size(Bin), Flags, Deadline,
+              [Bin | Buf], Handle);
 
         %%
         {select_read, Bin} -> %% All data, new recv operation in progress
@@ -6318,6 +6338,70 @@ recv_deadline(SockRef, Length, Flags, Deadline, Buf) ->
             after Timeout ->
                     _ = cancel(SockRef, recv, Handle),
                     recv_error(timeout, Buf_1)
+            end
+    end.
+
+recv_deadline_completion(SockRef, Length, Flags, Deadline, Buf, Handle) ->
+    Timeout = timeout(Deadline),
+    receive
+        %% On Windows we are *always* done when we get {ok, Bin}
+        %% If we should/can read more, the result is {more, Bin}
+        ?socket_msg(?socket(SockRef), completion,
+                    {Handle, {ok, Bin}}) ->
+            {ok, condense_buffer([Bin | Buf])};
+
+        %% Do we actually (currently) ever get this when Length =:= 0?
+        %% Future proofing?
+        %% This actually depends on the nif to stop reading
+        %% (stop returning 'more').
+        ?socket_msg(?socket(SockRef), completion,
+                    {Handle, {more, Bin}}) when (Length =:= 0) ->
+            if
+                0 < Timeout ->
+                    %% Recv more
+                    recv_deadline(
+                      SockRef, Length, Flags,
+                      Deadline, [Bin | Buf]);
+                true ->
+                    {error, {timeout, condense_buffer([Bin | Buf])}}
+            end;
+        %% We got the last chunk
+        ?socket_msg(?socket(SockRef), completion,
+                    {Handle, {more, Bin}})
+          when (Length =:= byte_size(Bin)) ->
+            {ok, condense_buffer([Bin | Buf])};
+
+        %% Just another chunk, but not the last
+        ?socket_msg(?socket(SockRef), completion,
+                    {Handle, {more, Bin}}) ->
+            if
+                0 < Timeout ->
+                    %% Recv more
+                    recv_deadline(
+                      SockRef, Length - byte_size(Bin), Flags,
+                      Deadline, [Bin | Buf]);
+                true ->
+                    {error, {timeout, condense_buffer([Bin | Buf])}}
+            end;
+
+        ?socket_msg(?socket(SockRef), completion,
+                    {Handle, {error, Reason}}) ->
+            recv_error(Reason, Buf);
+
+        ?socket_msg(_Socket, abort, {Handle, Reason}) ->
+            recv_error(Reason, Buf)
+
+    after Timeout ->
+            %% We may have received something anyway
+            case cancel_completion(SockRef, recv, Handle) of
+                {completed, {ok, Bin}} ->
+                    {ok, condense_buffer([Bin | Buf])};
+                {completed, {more, Bin}} ->
+                    recv_error(timeout, [Bin | Buf]);
+                {completed, {error, Reason}} ->
+                    recv_error(Reason, Buf);
+                _ ->
+                    recv_error(timeout, Buf)
             end
     end.
 
@@ -6580,8 +6664,13 @@ recvfrom_deadline(SockRef, BufSz, Flags, Deadline) ->
                 ?socket_msg(_Socket, abort, {Handle, Reason}) ->
                     {error, Reason}
             after Timeout ->
-                    _ = cancel(SockRef, recvfrom, Handle),
-                    {error, timeout}
+                    %% We may have received something anyway
+                    case cancel_completion(SockRef, recvfrom, Handle) of
+                        {completed, CompletionStatus} ->
+                            recvfrom_result(CompletionStatus);
+                        _ ->
+                            {error, timeout}
+                    end
             end;
 
         Result ->
@@ -6841,12 +6930,17 @@ recvmsg_deadline(SockRef, BufSz, CtrlSz, Flags, Deadline)  ->
             receive
                 ?socket_msg(?socket(SockRef), Tag,
                             {Handle, CompletionStatus}) ->
-                    recvmsg_result(CompletionStatus);
+                    recvmsg_completion_result(CompletionStatus);
                 ?socket_msg(_Socket, abort, {Handle, Reason}) ->
                     {error, Reason}
             after Timeout ->
-                    _ = cancel(SockRef, recvmsg, Handle),
-                    {error, timeout}
+                    %% We may have received something anyway
+                    case cancel_completion(SockRef, recvmsg, Handle) of
+                        {completed, CompletionStatus} ->
+                            recvmsg_completion_result(CompletionStatus);
+                        _ ->
+                            {error, timeout}
+                    end
             end;
 
         Result ->
@@ -6991,11 +7085,44 @@ recvmmsg_deadline(SockRef, VLen, BufSz, CtrlSz, Flags, Deadline) ->
                     {error, timeout}
             end;
 
+        completion ->
+            %% There is nothing just now, but we will be notified when there
+            %% is something to read (a completion message).
+            Timeout = timeout(Deadline),
+            receive
+                ?socket_msg(?socket(SockRef), completion,
+                            {Handle, CompletionStatus}) ->
+                    recvmmsg_completion_result(CompletionStatus);
+                ?socket_msg(_Socket, abort, {Handle, Reason}) ->
+                    {error, Reason}
+            after Timeout ->
+                    case cancel_completion(SockRef, recvmmsg, Handle) of
+                        {completed, CompletionStatus} ->
+                            recvmmsg_completion_result(CompletionStatus);
+                        _ ->
+                            {error, timeout}
+                    end
+            end;
+
         {ok, Msgs} ->
             {ok, Msgs};
         {error, _} = Error ->
             Error
     end.
+
+%% The control messages of a (synchronous) recvmsg result are decoded
+%% by prim_socket, but those of a completion message are not.
+recvmsg_completion_result({ok, Msg}) ->
+    recvmsg_result({ok, prim_socket:decode_control_messages(Msg)});
+recvmsg_completion_result(Result) ->
+    recvmsg_result(Result).
+
+%% As for recvmsg; the control messages of a completion result are
+%% not decoded.
+recvmmsg_completion_result({ok, Msgs}) ->
+    {ok, [prim_socket:decode_control_messages(Msg) || Msg <- Msgs]};
+recvmmsg_completion_result(Result) ->
+    Result.
 
 recvmsg_result(Result) ->
     %% ?DBG([{result, Result}]),
@@ -8035,6 +8162,11 @@ cancel(SockRef, Op, Handle) ->
             _ = flush_select_msg(SockRef, Handle),
             _ = flush_abort_msg(SockRef, Handle),
             ok;
+        completion ->
+            %% The operation is being cancelled in the kernel (io_uring),
+            %% and we will get one (final) message for it.
+            _ = await_cancelled(SockRef, Handle),
+            ok;
         not_found ->
             _ = flush_completion_msg(SockRef, Handle),
             _ = flush_abort_msg(SockRef, Handle),
@@ -8047,6 +8179,41 @@ cancel(SockRef, Op, Handle) ->
             _ = flush_abort_msg(SockRef, Handle),
 	    %% ?DBG([{op, Op}, {result, Result}]),
             Result
+    end.
+
+%% Cancel an operation of a completion based I/O backend (after a
+%% time-out). The operation may have completed anyway, in which case its
+%% result is returned (so that it is not lost):
+%%
+%%     {completed, Result} - The operation completed
+%%     {cancelled, Written} - (io_uring) A send was cancelled, after
+%%                            (maybe) some of the data had been sent
+%%     cancelled
+cancel_completion(SockRef, Op, Handle) ->
+    case prim_socket:cancel(SockRef, Op, Handle) of
+        completion ->
+            await_cancelled(SockRef, Handle);
+        _ ->
+            receive
+                ?socket_msg(?socket(SockRef), completion, {Handle, Result}) ->
+                    _ = flush_abort_msg(SockRef, Handle),
+                    {completed, Result}
+            after 0 ->
+                    _ = flush_abort_msg(SockRef, Handle),
+                    cancelled
+            end
+    end.
+
+%% The final message of an operation that was being cancelled
+%% in the kernel.
+await_cancelled(SockRef, Handle) ->
+    receive
+        ?socket_msg(?socket(SockRef), completion, {Handle, Result}) ->
+            {completed, Result};
+        ?socket_msg(?socket(SockRef), abort, {Handle, {cancelled, Written}}) ->
+            {cancelled, Written};
+        ?socket_msg(?socket(SockRef), abort, {Handle, _Reason}) ->
+            cancelled
     end.
 
 flush_select_msg(SockRef, Ref) ->
