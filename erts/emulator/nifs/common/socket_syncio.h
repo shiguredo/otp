@@ -104,12 +104,14 @@ extern ERL_NIF_TERM essio_send(ErlNifEnv*       env,
                                ERL_NIF_TERM     sockRef,
                                ERL_NIF_TERM     sendRef,
                                ErlNifBinary*    sndDataP,
+                               ERL_NIF_TERM     eData,
                                int              flags);
 extern ERL_NIF_TERM essio_sendto(ErlNifEnv*       env,
                                  ESockDescriptor* descP,
                                  ERL_NIF_TERM     sockRef,
                                  ERL_NIF_TERM     sendRef,
                                  ErlNifBinary*    dataP,
+                                 ERL_NIF_TERM     eData,
                                  int              flags,
                                  ESockAddress*    toAddrP,
                                  SOCKLEN_T        toAddrLen);
@@ -226,5 +228,28 @@ extern void essio_down(ErlNifEnv*           env,
 extern void essio_down_ctrl(ErlNifEnv*       env,
                             ESockDescriptor* descP,
                             const ErlNifPid* pidP);
+
+#ifdef ESOCK_HAVE_IO_URING
+/* Also used by the io_uring (esuio) backend */
+extern void essio_encode_msg(ErlNifEnv*       env,
+                             ESockDescriptor* descP,
+                             ssize_t          read,
+                             struct msghdr*   msgHdrP,
+                             ErlNifBinary*    dataBufP,
+                             ErlNifBinary*    ctrlBufP,
+                             ERL_NIF_TERM*    eMsg);
+extern BOOLEAN_T essio_accepted(ErlNifEnv*       env,
+                                ESockDescriptor* descP,
+                                ERL_NIF_TERM     sockRef,
+                                SOCKET           accSock,
+                                ErlNifPid        pid,
+                                ERL_NIF_TERM*    result);
+extern BOOLEAN_T essio_decode_cmsghdrs(ErlNifEnv*       env,
+                                       ESockDescriptor* descP,
+                                       ERL_NIF_TERM     eCMsg,
+                                       char*            cmsgHdrBufP,
+                                       size_t           cmsgHdrBufLen,
+                                       size_t*          cmsgHdrBufUsed);
+#endif
 
 #endif // SOCKET_SYNCIO_H__

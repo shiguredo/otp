@@ -537,6 +537,16 @@ typedef struct {
     SOCKET             origFD; // A 'socket' created from this FD
     BOOLEAN_T          closeOnClose; // Have we dup'ed or not
     BOOLEAN_T          selectRead; // Try to have read select active
+#ifdef ESOCK_HAVE_IO_URING
+    /* +++ io_uring (esuio) backend +++
+     * Only used when the esuio backend is active.
+     */
+    int                uringIdx;       // Ring of this socket (-1 = none yet)
+    unsigned int       uringReadOps;   // In-flight read ops (readMtx)
+    unsigned int       uringWriteOps;  // In-flight write ops (writeMtx)
+    void*              uringStash;     // Consumed but undelivered (readMtx)
+    BOOLEAN_T          uringStopPending; // Waiting for a select stop
+#endif
     /* +++ The dbg flag for SSDBG +++ */
     BOOLEAN_T          dbg;
     BOOLEAN_T          useReg;
@@ -752,6 +762,32 @@ ACTIVATE_NEXT_FUNCS_DEFS
                                          const ErlNifPid* pidP);
 ESOCK_OPERATOR_FUNCS_DEFS
 #undef ESOCK_OPERATOR_FUNCS_DEF
+
+#if defined(__WIN32__) || defined(ESOCK_HAVE_IO_URING)
+/* esock_acceptor_get | esock_writer_get | esock_reader_get
+ *
+ * Remove a requestor (acceptor, writer, or reader) from its queue
+ * and hand it over (including its monitor and env) to the caller.
+ * Used by the completion based backends.
+ */
+#define ESOCK_GET_FUNCS_DEF(O)                                  \
+    extern BOOLEAN_T esock_##O##_get(ErlNifEnv*       env,      \
+                                     ESockDescriptor* descP,    \
+                                     ERL_NIF_TERM*    refP,     \
+                                     const ErlNifPid* pidP,     \
+                                     ESockRequestor*  reqP);
+ESOCK_GET_FUNCS_DEF(acceptor)
+ESOCK_GET_FUNCS_DEF(writer)
+ESOCK_GET_FUNCS_DEF(reader)
+#undef ESOCK_GET_FUNCS_DEF
+#endif
+
+#ifdef ESOCK_HAVE_IO_URING
+/* Set when the esuio (io_uring) backend is the active backend.
+ * The request queues then may contain esuio operations (dataP).
+ */
+extern BOOLEAN_T esock_io_uring_active;
+#endif
 
 
 /* *** Environment wrapper functions ***

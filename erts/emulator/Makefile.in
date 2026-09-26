@@ -273,6 +273,7 @@ ultrasparcCFLAGS=-Wa,-xarch=v8plusa
 ARCHCFLAGS=$($(ARCH)CFLAGS)
 
 ERTS_BUILD_FALLBACK_POLL=@ERTS_BUILD_FALLBACK_POLL@
+ESOCK_IO_URING=@ESOCK_IO_URING@
 
 #
 #
@@ -1270,6 +1271,12 @@ OS_OBJS = \
 	$(OBJDIR)/sys_time.o \
 	$(OBJDIR)/sys_signal_stack.o \
 	$(OBJDIR)/unix_socket_syncio.o
+
+ifeq ($(ESOCK_IO_URING),yes)
+OS_OBJS += \
+	$(OBJDIR)/unix_socket_uring.o \
+	$(OBJDIR)/unix_socket_uringio.o
+endif
 
 DRV_OBJS = \
 	$(OBJDIR)/inet_drv.o \

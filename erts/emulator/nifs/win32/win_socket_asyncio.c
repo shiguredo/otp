@@ -2659,6 +2659,7 @@ ERL_NIF_TERM esaio_send(ErlNifEnv*       env,
                         ERL_NIF_TERM     sockRef,
                         ERL_NIF_TERM     sendRef,
                         ErlNifBinary*    sndDataP,
+                        ERL_NIF_TERM     eData,
                         int              flags)
 {
     ErlNifPid       caller;
@@ -2774,6 +2775,7 @@ ERL_NIF_TERM esaio_sendto(ErlNifEnv*       env,
                           ERL_NIF_TERM     sockRef,
                           ERL_NIF_TERM     sendRef,
                           ErlNifBinary*    sndDataP,
+                          ERL_NIF_TERM     eData,
                           int              flags,
                           ESockAddress*    toAddrP,
                           SOCKLEN_T        toAddrLen)

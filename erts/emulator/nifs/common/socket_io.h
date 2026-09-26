@@ -101,11 +101,15 @@ typedef ERL_NIF_TERM (*ESockIOPeelOff)(ErlNifEnv*       env,
                                        ERL_NIF_TERM     sockRef,
                                        ESockAssocId     assocId);
 
+/* eData is the data term (of sndDataP); a backend that needs to keep
+ * the data after the call can make a copy of it (instead of copying the
+ * data itself). */
 typedef ERL_NIF_TERM (*ESockIOSend)(ErlNifEnv*       env,
                                     ESockDescriptor* descP,
                                     ERL_NIF_TERM     sockRef,
                                     ERL_NIF_TERM     sendRef,
                                     ErlNifBinary*    sndDataP,
+                                    ERL_NIF_TERM     eData,
                                     int              flags);
 
 typedef ERL_NIF_TERM (*ESockIOSendTo)(ErlNifEnv*       env,
@@ -113,6 +117,7 @@ typedef ERL_NIF_TERM (*ESockIOSendTo)(ErlNifEnv*       env,
                                       ERL_NIF_TERM     sockRef,
                                       ERL_NIF_TERM     sendRef,
                                       ErlNifBinary*    dataP,
+                                      ERL_NIF_TERM     eData,
                                       int              flags,
                                       ESockAddress*    toAddrP,
                                       SOCKLEN_T        toAddrLen);
@@ -279,5 +284,8 @@ typedef void (*ESockIODown)(ErlNifEnv*           env,
                             ESockDescriptor*     descP,
                             const ErlNifPid*     pidP,
                             const ErlNifMonitor* monP);
+typedef void (*ESockIODownCtrl)(ErlNifEnv*       env,
+                                ESockDescriptor* descP,
+                                const ErlNifPid* pidP);
 
 #endif // SOCKET_IO_H__

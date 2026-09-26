@@ -402,6 +402,7 @@ static void (*esock_sctp_freepaddrs)(struct sockaddr *addrs) = NULL;
 #include "socket_io.h"
 #include "socket_asyncio.h"
 #include "socket_syncio.h"
+#include "socket_uringio.h"
 #include "prim_file_nif_dyncall.h"
 
 #if defined(ERTS_INLINE)
@@ -1165,13 +1166,13 @@ ESOCK_NIF_FUNCS
 /* =======================================================================
  * Socket specific backend 'synchronicity' functions.
  * This type is used to create 'sync' function table.
- * This table is initiated when the nif is loaded.
- * Initially, its content will be hardcoded to:
+ * This table is initiated when the nif is loaded:
  *   * Windows:      async (esaio)
+ *   * Linux:        sync (essio), or async (esuio; io_uring) when
+ *                   built with it and selected when the VM is started
+ *                   (the environment variable ESOCK_IO_BACKEND=io_uring).
+ *                   If io_uring can not be used, we fall back to essio.
  *   * Other (unix): sync  (essio)
- * When we introduce async I/O for unix (io_uring or something similar)
- * we may make it possible to choose (set a flag when the VM is started;
- * --esock-io=<async|sync>).
  */
 
 typedef struct {
@@ -1241,6 +1242,9 @@ typedef struct {
     ESockIODTor                  dtor;
     ESockIOStop                  stop;
     ESockIODown                  down;
+
+    /* The controlling process died (or was already dead when set) */
+    ESockIODownCtrl              down_ctrl;
 
 } ESockIoBackend;
 
@@ -2821,6 +2825,7 @@ ERL_NIF_TERM esock_atom_esock_name; // This has a "special" name ('$esock_name')
     LOCAL_ATOM_DECL(iow);              \
     LOCAL_ATOM_DECL(io_backend);       \
     LOCAL_ATOM_DECL(io_num_threads);   \
+    LOCAL_ATOM_DECL(io_uring);         \
     LOCAL_ATOM_DECL(ipv6_flowlabel);   \
     LOCAL_ATOM_DECL(listening);	       \
     LOCAL_ATOM_DECL(local_addr);       \
@@ -2971,6 +2976,16 @@ static ESockData data;
 /* Jump table for the I/O backend (async or sync) */
 static ESockIoBackend io_backend = {0};
 
+#ifdef ESOCK_HAVE_IO_URING
+/* Is the esuio (io_uring) backend the active backend? */
+BOOLEAN_T esock_io_uring_active = FALSE;
+/* If we were asked to use io_uring, but failed; why (errno) */
+static int ioUringInitErr = 0;
+
+static void esock_io_backend_esuio(void);
+static ERL_NIF_TERM esock_io_info_uring_fallback(ErlNifEnv* env);
+#endif
+
 
 /* This, the test for NULL), is temporary until we have a win stub */
 #define ESOCK_IO_INIT(NUMT)                                     \
@@ -3035,18 +3050,18 @@ static ESockIoBackend io_backend = {0};
     ((io_backend.peeloff != NULL) ?                     \
      io_backend.peeloff((ENV), (D), (SR), (AID)) :      \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
-#define ESOCK_IO_SEND(ENV, D, SR, RF, L, F)             \
+#define ESOCK_IO_SEND(ENV, D, SR, RF, L, ED, F)         \
     ((io_backend.send != NULL) ?                        \
      io_backend.send((ENV), (D),                        \
-                     (SR), (RF), (L), (F)) :            \
+                     (SR), (RF), (L), (ED), (F)) :      \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
 #define ESOCK_IO_SENDTO(ENV, D,                           \
                         SOCKR, SENDR,                     \
-                        DP, F, TAP, TAL)                  \
+                        DP, ED, F, TAP, TAL)              \
     ((io_backend.sendto != NULL) ?                        \
      io_backend.sendto((ENV), (D),                        \
                        (SOCKR), (SENDR),                  \
-                       (DP), (F), (TAP), (TAL)) :         \
+                       (DP), (ED), (F), (TAP), (TAL)) :   \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
 #define ESOCK_IO_SENDMSG(ENV, D,                        \
                          SOCKR, SENDR, EM, F, EIOV)     \
@@ -3205,6 +3220,9 @@ static ESockIoBackend io_backend = {0};
 #define ESOCK_IO_DOWN(ENV, D, PP, MP)                           \
     ((io_backend.down != NULL) ?                                \
      io_backend.down((ENV), (D), (PP), (MP)) : ((void) (D)))
+#define ESOCK_IO_DOWN_CTRL(ENV, D, PP)                          \
+    ((io_backend.down_ctrl != NULL) ?                           \
+     io_backend.down_ctrl((ENV), (D), (PP)) : ((void) (D)))
 
 
 
@@ -6492,7 +6510,8 @@ ERL_NIF_TERM nif_send(ErlNifEnv*         env,
      * is done!
      */
 
-    res = ESOCK_IO_SEND(env, descP, sockRef, sendRef, &sndData, flags);
+    res = ESOCK_IO_SEND(env, descP, sockRef, sendRef,
+                        &sndData, argv[1], flags);
 
     SSDBG( descP, ("SOCKET", "nif_send(%T) -> done with"
                    "\r\n   res: %T"
@@ -6587,7 +6606,7 @@ ERL_NIF_TERM nif_sendto(ErlNifEnv*         env,
             sockRef, descP->sock, descP->readState,
             sendRef, sndData.size, eSockAddr, flags) );
 
-    res = ESOCK_IO_SENDTO(env, descP, sockRef, sendRef, &sndData, flags,
+    res = ESOCK_IO_SENDTO(env, descP, sockRef, sendRef, &sndData, argv[1], flags,
                           &remoteAddr, remoteAddrLen);
 
     SSDBG( descP, ("SOCKET", "nif_sendto(%T) -> done with"
@@ -8118,12 +8137,7 @@ ERL_NIF_TERM esock_setopt_otp_ctrl_proc(ErlNifEnv*       env,
 
         enif_set_pid_undefined(&descP->ctrlPid);
 
-        /* Shall we use an function pointer argument instead? */
-#ifndef __WIN32__
-        essio_down_ctrl(env, descP, &newCtrlPid);
-#else
-        esaio_down_ctrl(env, descP, &newCtrlPid);
-#endif
+        ESOCK_IO_DOWN_CTRL(env, descP, &newCtrlPid);
 
         descP->readState  |= ESOCK_STATE_CLOSING;
         descP->writeState |= ESOCK_STATE_CLOSING;
@@ -17069,6 +17083,13 @@ ESockDescriptor* esock_alloc_descriptor(SOCKET sock)
     descP->dbg              = ESOCK_DEBUG_DEFAULT;      // Overwritten by caller
     descP->selectRead       = FALSE;
     descP->useReg           = ESOCK_USE_SOCKET_REGISTRY;// Overwritten by caller
+#ifdef ESOCK_HAVE_IO_URING
+    descP->uringIdx         = -1;
+    descP->uringReadOps     = 0;
+    descP->uringWriteOps    = 0;
+    descP->uringStash       = NULL;
+    descP->uringStopPending = FALSE;
+#endif
     descP->meta.env         = esock_alloc_env("esock_alloc_descriptor - "
                                               "meta-env");
     descP->meta.ref         = esock_atom_undefined;
@@ -17788,6 +17809,24 @@ int esock_select_cancel(ErlNifEnv*             env,
 
 #ifndef __WIN32__
 
+#ifdef ESOCK_HAVE_IO_URING
+/* A requestor with an operation (dataP) was queued by the esuio backend,
+ * it shall be handed over to io_uring (and not be select:ed).
+ * The operation may also complete directly, in which case we continue
+ * with the next requestor in the queue (if any).
+ */
+#define ESOCK_ACTIVATE_NEXT_URING(F)                                \
+    if (reqP->dataP != NULL) {                                      \
+        if (esuio_activate_##F(env, descP, sockRef)) {              \
+            popped    = TRUE;                                       \
+            activated = TRUE;                                       \
+        }                                                           \
+        continue;                                                   \
+    }
+#else
+#define ESOCK_ACTIVATE_NEXT_URING(F)
+#endif
+
 #define ACTIVATE_NEXT_FUNCS                                               \
     ACTIVATE_NEXT_FUNC_DECL(acceptor, read,  currentAcceptor, acceptorsQ) \
     ACTIVATE_NEXT_FUNC_DECL(writer,   write, currentWriter,   writersQ)   \
@@ -17811,6 +17850,8 @@ int esock_select_cancel(ErlNifEnv*             env,
             if (esock_requestor_pop(q, reqP)) {              \
                                                              \
                 /* There was another one */                  \
+                                                             \
+                ESOCK_ACTIVATE_NEXT_URING(F);                \
                                                              \
                 SSDBG( descP,                                           \
                        ("SOCKET",                                       \
@@ -17875,6 +17916,25 @@ ACTIVATE_NEXT_FUNCS
 #endif // #ifndef __WIN32__
 
 
+/* A queued (not yet started) esuio operation is owned by its requestor,
+ * so it has to be freed when the requestor is thrown away.
+ * No other backend put anything in there that needs to be freed
+ * (esaio uses the queue as a database of operations that are owned
+ * by the I/O completion port).
+ */
+#ifdef ESOCK_HAVE_IO_URING
+#define ESOCK_REQUESTOR_FREE_DATA(RP)                   \
+    do {                                                \
+        if (esock_io_uring_active &&                    \
+            ((RP)->dataP != NULL)) {                    \
+            esuio_free_queued_op((RP)->dataP);          \
+            (RP)->dataP = NULL;                         \
+        }                                               \
+    } while (0)
+#else
+#define ESOCK_REQUESTOR_FREE_DATA(RP) ((void) (RP))
+#endif
+
 /* ----------------------------------------------------------------------
  *  R e q u e s t o r   Q u e u e   F u n c t i o n s
  * ----------------------------------------------------------------------
@@ -17891,6 +17951,7 @@ void esock_free_request_queue(ESockRequestQueue* q)
     while (q->first) {
         ESockRequestQueueElement* free_me = q->first;
         q->first = free_me->nextP;
+        ESOCK_REQUESTOR_FREE_DATA(&free_me->data);
         esock_free_env("dtor", free_me->data.env);
         FREE(free_me);
     }
@@ -18003,7 +18064,7 @@ REQ_POP_FUNCS
  *
  */
 
-#ifdef __WIN32__
+#if defined(__WIN32__) || defined(ESOCK_HAVE_IO_URING)
 
 #define REQ_GET_FUNCS                           \
     REQ_GET_FUNC_DECL(acceptor, acceptorsQ)     \
@@ -18035,7 +18096,7 @@ REQ_POP_FUNCS
 REQ_GET_FUNCS
 #undef REQ_GET_FUNC_DECL
 
-#endif // #ifndef __WIN32__
+#endif // #if defined(__WIN32__) || defined(ESOCK_HAVE_IO_URING)
 
 
 
@@ -18203,6 +18264,7 @@ BOOLEAN_T qunqueue(ErlNifEnv*         env,
 
     if (e != NULL) {
         (void) DEMONP(slogan, env, descP, &e->data.mon);           
+        ESOCK_REQUESTOR_FREE_DATA(&e->data);
         esock_clear_env(slogan, e->data.env);
         esock_free_env(slogan, e->data.env);
         FREE(e);
@@ -18621,6 +18683,8 @@ void esock_inform_waiting_procs(ErlNifEnv*         env,
         (void) DEMONP("inform_waiting_procs -> current 'request'",
                       env, descP, &currentP->data.mon);
 
+        ESOCK_REQUESTOR_FREE_DATA(&currentP->data);
+
         nextP = currentP->nextP;
         FREE(currentP);
         currentP = nextP;
@@ -18685,6 +18749,66 @@ void esock_on_halt(void* priv_data)
 
     ESOCK_IO_FIN();
 }
+
+
+#ifdef ESOCK_HAVE_IO_URING
+
+/* The esuio backend is the essio backend where the operations that
+ * would block are handed over to io_uring instead of being select:ed.
+ * So we only need to replace the functions that actually differ.
+ * The table has already been filled in with the essio functions.
+ */
+static
+void esock_io_backend_esuio(void)
+{
+    io_backend.finish         = esuio_finish;
+    io_backend.info           = esuio_info;
+
+    io_backend.accept         = esuio_accept;
+    io_backend.connect        = esuio_connect;
+
+    io_backend.send           = esuio_send;
+    io_backend.sendto         = esuio_sendto;
+    io_backend.sendmsg        = esuio_sendmsg;
+    io_backend.sendmmsg       = esuio_sendmmsg;
+    io_backend.sendv          = esuio_sendv;
+    io_backend.recv           = esuio_recv;
+    io_backend.recvfrom       = esuio_recvfrom;
+    io_backend.recvmsg        = esuio_recvmsg;
+    io_backend.recvmmsg       = esuio_recvmmsg;
+
+    io_backend.close          = esuio_close;
+    io_backend.fin_close      = esuio_fin_close;
+
+    io_backend.cancel_connect = esuio_cancel_connect;
+    io_backend.cancel_accept  = esuio_cancel_accept;
+    io_backend.cancel_send    = esuio_cancel_send;
+    io_backend.cancel_recv    = esuio_cancel_recv;
+
+    io_backend.dtor           = esuio_dtor;
+    io_backend.stop           = esuio_stop;
+    io_backend.down           = esuio_down;
+    io_backend.down_ctrl      = esuio_down_ctrl;
+}
+
+
+/* We were asked to use io_uring, but could not.
+ * Make that visible in the (essio) backend info.
+ */
+static
+ERL_NIF_TERM esock_io_info_uring_fallback(ErlNifEnv* env)
+{
+    ERL_NIF_TERM info = essio_info(env);
+    ERL_NIF_TERM reason =
+        esock_make_error(env, MKA(env, erl_errno_id(ioUringInitErr)));
+
+    ESOCK_ASSERT( enif_make_map_put(env, info, atom_io_uring, reason,
+                                    &info) );
+
+    return info;
+}
+
+#endif // ESOCK_HAVE_IO_URING
 
 
 /* ----------------------------------------------------------------------
@@ -18786,6 +18910,9 @@ int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
     ErlNifSysInfo sysInfo;
     unsigned int  ioNumThreads, ioNumThreadsDef;
+#ifdef ESOCK_HAVE_IO_URING
+    ERL_NIF_TERM  ioBackend;
+#endif
 
 
 #if defined(ESOCK_DISPLAY_SOCKADDR_SIZES)
@@ -19074,6 +19201,7 @@ int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     io_backend.dtor           = esaio_dtor;
     io_backend.stop           = NULL; // esaio_stop;
     io_backend.down           = esaio_down;
+    io_backend.down_ctrl      = esaio_down_ctrl;
 
 #else
 
@@ -19152,11 +19280,44 @@ int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     io_backend.dtor           = essio_dtor;
     io_backend.stop           = essio_stop;
     io_backend.down           = essio_down;
+    io_backend.down_ctrl      = essio_down_ctrl;
 
 #endif
 
 #if defined(ESOCK_DISPLAY_ON_LOAD_DETAILS)
     ESOCK_EPRINTF("\r\n[ESOCK] init I/O backend\r\n");
+#endif
+#ifdef ESOCK_HAVE_IO_URING
+    /* The io_uring backend is only used when explicitly asked for.
+     * If it can not be initiated (not allowed by the kernel, the
+     * sysctl kernel.io_uring_disabled or a seccomp filter, or the
+     * kernel is too old) we fall back to (keep) the essio backend.
+     */
+    if (enif_get_map_value(env, load_info, atom_io_backend, &ioBackend) &&
+        (COMPARE(ioBackend, atom_io_uring) == 0)) {
+        unsigned int ioUringNumThreadsDef =
+            (sysInfo.scheduler_threads > 0) ?
+            (unsigned int) sysInfo.scheduler_threads : 1;
+        unsigned int ioUringNumThreads =
+            esock_get_uint_from_map(env, load_info,
+                                    atom_io_num_threads,
+                                    ioUringNumThreadsDef);
+        int ures = esuio_init(ioUringNumThreads, &data);
+
+        if (ures == ESOCK_IO_OK) {
+            esock_io_backend_esuio();
+            esock_io_uring_active = TRUE;
+        } else {
+            esock_warning_msg("[ESOCK] Failed initiating the io_uring "
+                              "I/O backend (%s) - using the default\r\n",
+                              erl_errno_id(-ures));
+            ioUringInitErr        = -ures;
+            io_backend.info       = esock_io_info_uring_fallback;
+        }
+    }
+    if (esock_io_uring_active) {
+        /* Already initiated */
+    } else
 #endif
     if (ESOCK_IO_INIT(ioNumThreads) != ESOCK_IO_OK) {
         esock_error_msg("Failed initiating I/O backend");

@@ -2998,6 +2998,7 @@ ERL_NIF_TERM essio_send(ErlNifEnv*       env,
                         ERL_NIF_TERM     sockRef,
                         ERL_NIF_TERM     sendRef,
                         ErlNifBinary*    sndDataP,
+                        ERL_NIF_TERM     eData,
                         int              flags)
 {
     ssize_t      send_result;
@@ -3044,6 +3045,7 @@ ERL_NIF_TERM essio_sendto(ErlNifEnv*       env,
                           ERL_NIF_TERM     sockRef,
                           ERL_NIF_TERM     sendRef,
                           ErlNifBinary*    dataP,
+                          ERL_NIF_TERM     eData,
                           int              flags,
                           ESockAddress*    toAddrP,
                           SOCKLEN_T        toAddrLen)
@@ -10729,5 +10731,51 @@ void essio_down_reader(ErlNifEnv*           env,
     }
 }
 
+
+#ifdef ESOCK_HAVE_IO_URING
+
+/* ========================================================================
+ * Functions (also) used by the io_uring (esuio) backend.
+ */
+
+extern
+void essio_encode_msg(ErlNifEnv*       env,
+                      ESockDescriptor* descP,
+                      ssize_t          read,
+                      struct msghdr*   msgHdrP,
+                      ErlNifBinary*    dataBufP,
+                      ErlNifBinary*    ctrlBufP,
+                      ERL_NIF_TERM*    eMsg)
+{
+    encode_msg(env, descP, read, msgHdrP, dataBufP, ctrlBufP, eMsg);
+}
+
+/* A connection has been accepted (the new socket is set up, and
+ * *result is {ok, AccRef}). The acceptor (pid) becomes the owner.
+ */
+extern
+BOOLEAN_T essio_accepted(ErlNifEnv*       env,
+                         ESockDescriptor* descP,
+                         ERL_NIF_TERM     sockRef,
+                         SOCKET           accSock,
+                         ErlNifPid        pid,
+                         ERL_NIF_TERM*    result)
+{
+    return essio_accept_accepted(env, descP, sockRef, accSock, pid, result);
+}
+
+extern
+BOOLEAN_T essio_decode_cmsghdrs(ErlNifEnv*       env,
+                                ESockDescriptor* descP,
+                                ERL_NIF_TERM     eCMsg,
+                                char*            cmsgHdrBufP,
+                                size_t           cmsgHdrBufLen,
+                                size_t*          cmsgHdrBufUsed)
+{
+    return decode_cmsghdrs(env, descP, eCMsg,
+                           cmsgHdrBufP, cmsgHdrBufLen, cmsgHdrBufUsed);
+}
+
+#endif // ESOCK_HAVE_IO_URING
 
 #endif // ESOCK_ENABLE
