@@ -51,7 +51,7 @@
     cancel/3
    ]).
 
--export([enc_sockaddr/1, p_get/1, rest_iov/2]).
+-export([enc_sockaddr/1, p_get/1, rest_iov/2, decode_control_messages/1]).
 
 -nifs([nif_info/0, nif_info/1,
        nif_supports/0, nif_supports/1,
@@ -175,9 +175,32 @@ on_load(Extra) when is_map(Extra) ->
                         socket_debug   => true,
                         debug_filename => enc_path(DebugFilename)}
           end,
+    %% The I/O backend; currently only io_uring (Linux) can be selected,
+    %% the default is the (platform) default backend.
+    Extra_3 =
+        case os:getenv("ESOCK_IO_BACKEND") of
+            "io_uring" ->
+                Extra_2#{io_backend => io_uring};
+            _ ->
+                Extra_2
+        end,
+    Extra_4 =
+        case os:getenv("ESOCK_IO_NUM_THREADS") of
+            false ->
+                Extra_3;
+            NumThreadsStr ->
+                try list_to_integer(NumThreadsStr) of
+                    NumThreads when NumThreads > 0 ->
+                        Extra_3#{io_num_threads => NumThreads};
+                    _ ->
+                        Extra_3
+                catch error : badarg ->
+                        Extra_3
+                end
+        end,
     %% This will fail if the user has disabled esock support, making all NIFs
     %% fall back to their Erlang implementation which throws `notsup`.
-    LoadRes = erlang:load_nif(atom_to_list(?MODULE), Extra_2),
+    LoadRes = erlang:load_nif(atom_to_list(?MODULE), Extra_4),
     p_put(load_nif_result, LoadRes),
     init().
 
@@ -595,6 +618,8 @@ sendto(SockRef, Bin, {_, ETo, EFlags} = Cont, SendRef) ->
         {select, Written} ->
             <<_:Written/binary, RestBin/binary>> = Bin,
             {select, RestBin, Cont};
+        completion = C ->
+            C;
         {error, _Reason} = Result ->
             Result
     end.
